@@ -1,0 +1,299 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: drug
+    description: Substance-modulated LLM inference
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /drug:
+    post:
+      operationId: drugGenerate
+      tags: [drug]
+      summary: Generate substance-modulated LLM completion
+      description: >
+        Accepts a prompt and substance name, applies the corresponding
+        sampling perturbation (temperature, top_p, top_k, repetition_penalty),
+        and returns one or more completions from the local Gemma 4 model.
+        Falls back to a demo response when the sidecar is unavailable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DrugRequest"
+      responses:
+        "200":
+          description: Completions with EGO metrics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DrugResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /drug/substances:
+    get:
+      operationId: listSubstances
+      tags: [drug]
+      summary: List available substances and their sampling configs
+      responses:
+        "200":
+          description: Substance catalogue
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubstanceCatalogue"
+  /drug/health:
+    get:
+      operationId: sidecarHealth
+      tags: [drug]
+      summary: Check Gemma sidecar availability
+      responses:
+        "200":
+          description: Sidecar status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SidecarStatus"
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    DrugRequest:
+      type: object
+      required:
+        - prompt
+        - substance
+      properties:
+        prompt:
+          type: string
+          description: The user prompt to send to the model
+        substance:
+          type: string
+          description: One of sober|caffeine|alcohol|cannabis|mdma|lsd|psilocybin|cocaine|ketamine
+        replicate_count:
+          type: integer
+          minimum: 1
+          maximum: 8
+          default: 1
+          description: Number of independent completions to generate (multi-run mode for LSD/multiverse)
+        messages:
+          type: array
+          description: Optional conversation history (role/content pairs)
+          items:
+            $ref: "#/components/schemas/ChatMessage"
+
+    ChatMessage:
+      type: object
+      required:
+        - role
+        - content
+      properties:
+        role:
+          type: string
+          enum: [user, assistant]
+        content:
+          type: string
+
+    DrugResponse:
+      type: object
+      required:
+        - substance
+        - texts
+        - sampling_config
+        - ego_metrics
+        - run_id
+        - mode
+      properties:
+        run_id:
+          type: string
+        mode:
+          type: string
+          enum: [sidecar, demo]
+        substance:
+          type: string
+        texts:
+          type: array
+          items:
+            type: string
+        sampling_config:
+          $ref: "#/components/schemas/SamplingConfig"
+        ego_metrics:
+          $ref: "#/components/schemas/EgoMetrics"
+        token_metrics:
+          type: array
+          nullable: true
+          items:
+            $ref: "#/components/schemas/TokenMetrics"
+          description: >
+            Per-replicate token-level statistics. Populated only in sidecar mode.
+            Array index matches texts[i]. null in demo mode.
+
+    SamplingConfig:
+      type: object
+      properties:
+        temperature:
+          type: number
+        top_p:
+          type: number
+        top_k:
+          type: integer
+        repetition_penalty:
+          type: number
+        max_new_tokens:
+          type: integer
+        do_sample:
+          type: boolean
+
+    EgoMetrics:
+      type: object
+      properties:
+        cost_dyn:
+          type: number
+          nullable: true
+        lmi_empirical:
+          type: number
+          nullable: true
+        r_eff_empirical:
+          type: number
+          nullable: true
+        clei_llm:
+          type: number
+          nullable: true
+        alpha_s_est:
+          type: number
+          nullable: true
+        recoverability_est:
+          type: number
+          nullable: true
+        latency_ms:
+          type: number
+          nullable: true
+        completion_tokens:
+          type: integer
+          nullable: true
+        prompt_tokens:
+          type: integer
+          nullable: true
+        peak_vram_gb:
+          type: number
+          nullable: true
+
+    TokenMetrics:
+      type: object
+      description: >
+        Run-level aggregation of per-token statistics for one replicate.
+        Thresholds: low_margin < 0.10, high_entropy > ln(10) ≈ 2.3026.
+      properties:
+        mean_logprob:
+          type: number
+          nullable: true
+        mean_entropy:
+          type: number
+          nullable: true
+        mean_margin_top1_top2:
+          type: number
+          nullable: true
+        entropy_std:
+          type: number
+          nullable: true
+        margin_std:
+          type: number
+          nullable: true
+        num_low_margin_steps:
+          type: integer
+          nullable: true
+        num_high_entropy_steps:
+          type: integer
+          nullable: true
+
+    SubstanceCatalogue:
+      type: object
+      required:
+        - substances
+      properties:
+        substances:
+          type: array
+          items:
+            $ref: "#/components/schemas/SubstanceInfo"
+
+    SubstanceInfo:
+      type: object
+      required:
+        - id
+        - label
+        - family
+        - sampling_config
+        - intensity
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        family:
+          type: string
+        intensity:
+          type: integer
+        sampling_config:
+          $ref: "#/components/schemas/SamplingConfig"
+
+    SidecarStatus:
+      type: object
+      required:
+        - available
+      properties:
+        available:
+          type: boolean
+        model:
+          type: string
+          nullable: true
+        device:
+          type: string
+          nullable: true
+        error:
+          type: string
+          nullable: true
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
