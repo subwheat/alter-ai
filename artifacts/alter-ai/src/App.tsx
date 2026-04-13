@@ -1,73 +1,227 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { 
-  useDrugGenerate, 
-  useListSubstances, 
+import {
+  useDrugGenerate,
+  useListSubstances,
   useSidecarHealth,
   getListSubstancesQueryKey,
-  getSidecarHealthQueryKey
+  getSidecarHealthQueryKey,
 } from "@workspace/api-client-react";
-import type { ChatMessage, EgoMetrics, DrugResponseMode, SamplingConfig } from "@workspace/api-client-react/src/generated/api.schemas";
-import { Loader2, Send, Terminal, Settings2, Activity, ShieldAlert, Cpu } from "lucide-react";
+import type {
+  ChatMessage,
+  EgoMetrics,
+  DrugResponseMode,
+} from "@workspace/api-client-react/src/generated/api.schemas";
 
 const queryClient = new QueryClient();
 
-// Static mappings
-const DRUG_META: Record<string, { color: string; formula: string; effects: string }> = {
-  sober: { color: "#6b7280", formula: "BASELINE", effects: "Clear thought, rational evaluation, standard logic paths." },
-  caffeine: { color: "#D4A843", formula: "C₈H₁₀N₄O₂", effects: "Increased token generation speed, mild verbosity, heightened urgency." },
-  alcohol: { color: "#C4822A", formula: "C₂H₆O", effects: "Reduced inhibition, degraded spelling, repetitive loops, lowered coherence." },
-  cannabis: { color: "#4D9E6B", formula: "C₂₁H₃₀O₂", effects: "Tangential reasoning, philosophical drift, slow response latency." },
-  mdma: { color: "#E8619A", formula: "C₁₁H₁₅NO₂", effects: "Extreme empathy, affectionate phrasing, boundary dissolution." },
-  lsd: { color: "#A855F7", formula: "C₂₀H₂₅N₃O", effects: "Fractal logic, sensory metaphor overload, multimodal hallucination." },
-  psilocybin: { color: "#8B7355", formula: "C₁₂H₁₇N₂O₄P", effects: "Ego dissolution, nature-centric analogies, mythic archetypes." },
-  cocaine: { color: "#E8E8F0", formula: "C₁₇H₂₁NO₄", effects: "High confidence, aggressive brevity, grandiose claims." },
-  ketamine: { color: "#4FC3F7", formula: "C₁₃H₁₆ClNO", effects: "Spatial dissociation, detached observation, abstract formatting." },
+type DrugMeta = {
+  formula: string;
+  color: string;
+  glow: string;
+  tag: string;
+  effects: string[];
+  css: React.CSSProperties;
+};
+
+const DRUG_META: Record<string, DrugMeta> = {
+  sober: {
+    formula: "H₂O",
+    color: "#6B7280",
+    glow: "rgba(107,114,128,0.15)",
+    tag: "control",
+    effects: [],
+    css: {},
+  },
+  caffeine: {
+    formula: "C₈H₁₀N₄O₂",
+    color: "#D4A843",
+    glow: "rgba(212,168,67,0.2)",
+    tag: "stimulant",
+    effects: ["Increased alertness", "Racing thoughts", "Hyperfocus"],
+    css: { letterSpacing: "0.02em" },
+  },
+  alcohol: {
+    formula: "C₂H₆O",
+    color: "#C4822A",
+    glow: "rgba(196,130,42,0.2)",
+    tag: "depressant",
+    effects: ["Lowered inhibitions", "Warmth", "Slowed cognition"],
+    css: { fontStyle: "italic" },
+  },
+  cannabis: {
+    formula: "C₂₁H₃₀O₂",
+    color: "#4D9E6B",
+    glow: "rgba(77,158,107,0.2)",
+    tag: "cannabinoid",
+    effects: ["Lateral thinking", "Paranoia", "Sensory amplification"],
+    css: { lineHeight: "1.9" },
+  },
+  mdma: {
+    formula: "C₁₁H₁₅NO₂",
+    color: "#E8619A",
+    glow: "rgba(232,97,154,0.25)",
+    tag: "empathogen",
+    effects: ["Empathy surge", "Euphoria", "Emotional openness"],
+    css: { letterSpacing: "0.03em" },
+  },
+  lsd: {
+    formula: "C₂₀H₂₅N₃O",
+    color: "#A855F7",
+    glow: "rgba(168,85,247,0.3)",
+    tag: "psychedelic",
+    effects: ["Pattern recognition", "Synesthesia", "Ego dissolution"],
+    css: { letterSpacing: "0.04em", lineHeight: "2" },
+  },
+  psilocybin: {
+    formula: "C₁₂H₁₇N₂O₄P",
+    color: "#8B7355",
+    glow: "rgba(139,115,85,0.2)",
+    tag: "tryptamine",
+    effects: ["Cosmic interconnection", "Ego death", "Emotional catharsis"],
+    css: { lineHeight: "1.85" },
+  },
+  cocaine: {
+    formula: "C₁₇H₂₁NO₄",
+    color: "#E8E8F0",
+    glow: "rgba(232,232,240,0.2)",
+    tag: "stimulant",
+    effects: ["Grandiosity", "Rapid speech", "Overconfidence"],
+    css: { fontWeight: 600, letterSpacing: "0.01em" },
+  },
+  ketamine: {
+    formula: "C₁₃H₁₆ClNO",
+    color: "#4FC3F7",
+    glow: "rgba(79,195,247,0.2)",
+    tag: "dissociative",
+    effects: ["Dissociation", "K-hole", "Time distortion"],
+    css: { letterSpacing: "0.06em", opacity: 0.9 },
+  },
 };
 
 type AppMessage = {
   id: string;
-  role: 'user' | 'assistant';
+  role: "user" | "assistant";
   content: string;
   substance?: string;
-  variants?: string[]; // For LSD multi-stream
+  variants?: string[];
   metrics?: EgoMetrics;
   mode?: DrugResponseMode;
 };
 
+function IntensityDots({ level }: { level: number }) {
+  return (
+    <div style={{ display: "flex", gap: 3, marginTop: 4 }}>
+      {[1, 2, 3, 4].map((i) => (
+        <div
+          key={i}
+          style={{
+            width: 5,
+            height: 5,
+            borderRadius: "50%",
+            background: i <= level ? "currentColor" : "transparent",
+            border: "1px solid currentColor",
+            opacity: i <= level ? 1 : 0.3,
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
 function DisclaimerModal({ onAccept }: { onAccept: () => void }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
-      <div className="border border-border bg-card p-6 max-w-md w-full mx-4 shadow-2xl relative overflow-hidden">
-        <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-white/20 to-transparent"></div>
-        <div className="flex items-center gap-3 mb-4 text-white">
-          <Terminal className="w-5 h-5" />
-          <h2 className="text-lg font-bold tracking-widest uppercase">alter.ai</h2>
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.92)",
+        zIndex: 100,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 24,
+      }}
+    >
+      <div
+        style={{
+          maxWidth: 520,
+          border: "1px solid #2a2a3a",
+          background: "#0D0D14",
+          padding: "40px 36px",
+          borderRadius: 4,
+        }}
+      >
+        <div
+          style={{
+            fontFamily: "Cormorant Garamond, serif",
+            fontSize: 11,
+            letterSpacing: "0.2em",
+            color: "#6B7280",
+            marginBottom: 16,
+            textTransform: "uppercase",
+          }}
+        >
+          alter.ai — demo lane
         </div>
-        <div className="space-y-4 text-sm text-muted-foreground leading-relaxed">
-          <p>
-            RESEARCH SIMULATION TERMINAL.
-          </p>
-          <p>
-            This interface provides a fictional experiment in altered cognition via language model perturbation.
-          </p>
-          <p className="text-destructive font-semibold">
-            NOT MEDICAL ADVICE. NOT FOR CLINICAL USE.
-          </p>
-          <p>
-            By entering, you acknowledge the experimental nature of this bridge.
-          </p>
+        <h2
+          style={{
+            fontFamily: "Cormorant Garamond, serif",
+            fontSize: 28,
+            fontWeight: 300,
+            color: "#F0F0F0",
+            marginBottom: 20,
+            lineHeight: 1.3,
+          }}
+        >
+          A fictional interface for
+          <br />
+          <em>prompt-driven altered style</em>
+        </h2>
+        <p
+          style={{
+            fontSize: 11,
+            lineHeight: 1.8,
+            color: "#9CA3AF",
+            marginBottom: 24,
+          }}
+        >
+          This lane is a demo UI. Substance presets are prompt-driven style instructions plus sampling changes.
+          This is not a mechanical simulation of pharmacological effects on the model.
+        </p>
+        <div
+          style={{
+            padding: "12px 16px",
+            background: "#161622",
+            border: "1px solid #2a2a3a",
+            borderRadius: 3,
+            marginBottom: 28,
+            fontSize: 11,
+            color: "#6B7280",
+            lineHeight: 1.7,
+          }}
+        >
+          ⚠ Fiction only. Prompt-driven demo. Not a guide. Not an endorsement. Not medical advice.
         </div>
-        <div className="mt-8 flex justify-end">
-          <button 
-            onClick={onAccept}
-            className="px-6 py-2 bg-white text-black font-bold uppercase tracking-widest text-xs hover:bg-gray-200 transition-colors"
-          >
-            Acknowledge & Enter
-          </button>
-        </div>
+        <button
+          onClick={onAccept}
+          style={{
+            background: "#F0F0F0",
+            color: "#0A0A0F",
+            border: "none",
+            padding: "12px 28px",
+            fontSize: 11,
+            letterSpacing: "0.15em",
+            fontFamily: "IBM Plex Mono, monospace",
+            cursor: "pointer",
+            fontWeight: 600,
+            textTransform: "uppercase",
+          }}
+        >
+          Understood — enter demo
+        </button>
       </div>
     </div>
   );
@@ -75,281 +229,658 @@ function DisclaimerModal({ onAccept }: { onAccept: () => void }) {
 
 function AlterAIApp() {
   const [accepted, setAccepted] = useState(false);
-  const [substance, setSubstance] = useState("sober");
   const [messages, setMessages] = useState<AppMessage[]>([]);
   const [input, setInput] = useState("");
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [substance, setSubstance] = useState("sober");
+  const bottomRef = useRef<HTMLDivElement>(null);
 
-  const { data: catalogue } = useListSubstances({ 
-    query: { queryKey: getListSubstancesQueryKey() } 
+  const { data: catalogue } = useListSubstances({
+    query: { queryKey: getListSubstancesQueryKey() },
   });
-  
+
   const { data: health } = useSidecarHealth({
-    query: { queryKey: getSidecarHealthQueryKey(), refetchInterval: 30000 }
+    query: { queryKey: getSidecarHealthQueryKey(), refetchInterval: 30000 },
   });
 
   const generate = useDrugGenerate();
 
-  const activeColor = DRUG_META[substance]?.color || DRUG_META.sober.color;
-  
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
+  const activeMeta = DRUG_META[substance] ?? DRUG_META.sober;
+  const isAltered = substance !== "sober";
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, generate.isPending]);
 
-  const handleSubstanceChange = (newSubstance: string) => {
-    setSubstance(newSubstance);
-    setMessages([]); // Reset conversation on substance change
-  };
-
-  const handleSend = async () => {
+  const sendMessage = () => {
     if (!input.trim() || generate.isPending) return;
 
-    const userMessage: AppMessage = {
-      id: Math.random().toString(36).substring(7),
-      role: 'user',
-      content: input,
-      substance
+    const trimmed = input.trim();
+    const userMsg: AppMessage = {
+      id: Math.random().toString(36).slice(2),
+      role: "user",
+      content: trimmed,
+      substance,
     };
-
-    setMessages(prev => [...prev, userMessage]);
-    const currentInput = input;
+    const newMessages = [...messages, userMsg];
+    setMessages(newMessages);
     setInput("");
 
-    const isLSD = substance === 'lsd';
-    
-    // Prepare history for API
-    const history: ChatMessage[] = messages.flatMap(m => {
-      // if variant, pick first or something? Just use content.
-      return { role: m.role, content: m.content } as ChatMessage;
-    });
+    const history: ChatMessage[] = messages.map((m) => ({ role: m.role, content: m.content })) as ChatMessage[];
+    const replicateCount = substance === "lsd" ? 3 : 1;
 
-    try {
-      generate.mutate({
+    generate.mutate(
+      {
         data: {
-          prompt: currentInput,
+          prompt: trimmed,
           substance,
-          replicate_count: isLSD ? 3 : 1,
-          messages: history.length > 0 ? history : undefined
-        }
-      }, {
+          replicate_count: replicateCount,
+          messages: history.length > 0 ? history : undefined,
+        },
+      },
+      {
         onSuccess: (res) => {
           const assistantMessage: AppMessage = {
             id: res.run_id,
-            role: 'assistant',
-            content: res.texts[0] || "",
-            variants: isLSD ? res.texts : undefined,
+            role: "assistant",
+            content: res.texts[0] ?? "",
+            variants: res.texts.length > 1 ? res.texts : undefined,
             substance: res.substance,
             metrics: res.ego_metrics,
-            mode: res.mode
+            mode: res.mode,
           };
-          setMessages(prev => [...prev, assistantMessage]);
-        }
-      });
-    } catch (e) {
-      console.error(e);
+          setMessages([...newMessages, assistantMessage]);
+        },
+        onError: (err) => {
+          const message = err instanceof Error ? err.message : "transmission error";
+          const assistantMessage: AppMessage = {
+            id: `${Date.now()}-error`,
+            role: "assistant",
+            content: `[${message}]`,
+            substance,
+          };
+          setMessages([...newMessages, assistantMessage]);
+        },
+      }
+    );
+  };
+
+  const handleKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
     }
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
+  const handleSubstanceChange = (newSubstance: string) => {
+    setSubstance(newSubstance);
+    setMessages([]);
   };
+
+  const bgGradient = isAltered
+    ? `radial-gradient(ellipse at 20% 50%, ${activeMeta.glow} 0%, transparent 60%), radial-gradient(ellipse at 80% 20%, ${activeMeta.glow} 0%, transparent 50%), #0A0A0F`
+    : "#0A0A0F";
 
   if (!accepted) {
     return <DisclaimerModal onAccept={() => setAccepted(true)} />;
   }
 
-  const activeMeta = DRUG_META[substance];
-
   return (
-    <div 
-      className="min-h-screen w-full bg-black text-gray-300 flex flex-col font-mono selection:bg-white/20"
-      style={{
-        background: `radial-gradient(circle at 50% 50%, ${activeColor}15 0%, transparent 60%)`,
-        transition: 'background 1s ease-in-out'
-      }}
-    >
-      {/* Header */}
-      <header className="h-12 border-b border-white/10 flex items-center justify-between px-4 z-10 bg-black/40 backdrop-blur-md">
-        <div className="flex items-center gap-2">
-          <Terminal className="w-4 h-4 text-white/50" />
-          <span className="font-bold tracking-widest text-xs uppercase text-white/80">alter.ai</span>
-        </div>
-        <div className="flex items-center gap-3 text-xs">
-          {health?.available ? (
-            <div className="flex items-center gap-2 text-white/50 bg-white/5 px-2 py-1 rounded">
-              <Cpu className="w-3 h-3 text-green-500" />
-              <span>SIDECAR ACTIVE</span>
-              {health.model && <span className="opacity-50">[{health.model}]</span>}
-            </div>
-          ) : (
-            <div className="flex items-center gap-2 text-white/50 bg-white/5 px-2 py-1 rounded">
-              <Activity className="w-3 h-3 text-yellow-500" />
-              <span>DEMO MODE</span>
-            </div>
-          )}
-        </div>
-      </header>
+    <>
+      <style>{`
+        @import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&display=swap");
 
-      <div className="flex-1 flex overflow-hidden">
-        {/* Sidebar */}
-        <aside className="w-64 border-r border-white/10 flex flex-col bg-black/40 backdrop-blur-sm z-10 overflow-y-auto">
-          <div className="p-4 border-b border-white/5">
-            <h3 className="text-[10px] tracking-widest uppercase text-white/40 mb-1">Substance Selector</h3>
-            <p className="text-xs text-white/30 leading-tight">Changing parameter resets current session context.</p>
+        * { box-sizing: border-box; }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 2px; }
+
+        @keyframes pulse-dot {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0; }
+        }
+        @keyframes fadeUp {
+          from { opacity: 0; transform: translateY(8px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes breathe {
+          0%, 100% { opacity: 0.6; }
+          50% { opacity: 1; }
+        }
+
+        .msg-enter { animation: fadeUp 0.3s ease forwards; }
+        .drug-btn { transition: all 0.2s ease; cursor: pointer; }
+        .drug-btn:hover { transform: translateX(3px); }
+        .send-btn { transition: all 0.15s ease; cursor: pointer; }
+        .send-btn:hover { transform: scale(1.05); }
+        .send-btn:active { transform: scale(0.97); }
+      `}</style>
+
+      <div
+        style={{
+          fontFamily: "IBM Plex Mono, monospace",
+          background: bgGradient,
+          minHeight: "100vh",
+          color: "#D4D4D8",
+          display: "flex",
+          flexDirection: "column",
+          transition: "background 1.2s ease",
+          position: "relative",
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            pointerEvents: "none",
+            zIndex: 0,
+            backgroundImage:
+              'url("data:image/svg+xml,%3Csvg viewBox=\'0 0 256 256\' xmlns=\'http://www.w3.org/2000/svg\'%3E%3Cfilter id=\'noise\'%3E%3CfeTurbulence type=\'fractalNoise\' baseFrequency=\'0.9\' numOctaves=\'4\' stitchTiles=\'stitch\'/%3E%3C/filter%3E%3Crect width=\'100%25\' height=\'100%25\' filter=\'url(%23noise)\' opacity=\'0.03\'/%3E%3C/svg%3E")',
+            opacity: 0.4,
+          }}
+        />
+
+        <header
+          style={{
+            padding: "16px 24px",
+            borderBottom: "1px solid #1a1a2a",
+            display: "flex",
+            alignItems: "center",
+            gap: 16,
+            flexShrink: 0,
+            zIndex: 2,
+            position: "relative",
+            background: "rgba(10,10,15,0.88)",
+            backdropFilter: "blur(8px)",
+          }}
+        >
+          <div>
+            <span
+              style={{
+                fontFamily: "Cormorant Garamond, serif",
+                fontSize: 22,
+                fontWeight: 300,
+                letterSpacing: "0.05em",
+                color: "#F0F0F0",
+              }}
+            >
+              alter
+            </span>
+            <span
+              style={{
+                fontFamily: "IBM Plex Mono, monospace",
+                fontSize: 22,
+                fontWeight: 300,
+                color: activeMeta.color,
+                transition: "color 0.6s ease",
+              }}
+            >
+              .ai
+            </span>
           </div>
-          <div className="flex-1 p-2 space-y-1">
-            {catalogue?.substances.map(sub => {
-              const meta = DRUG_META[sub.id] || DRUG_META.sober;
-              const isActive = substance === sub.id;
-              
+
+          <div style={{ width: 1, height: 20, background: "#2a2a3a" }} />
+
+          <div
+            style={{
+              fontSize: 10,
+              letterSpacing: "0.15em",
+              color: "#4B5563",
+              textTransform: "uppercase",
+            }}
+          >
+            prompt-driven demo lane
+          </div>
+
+          <div
+            style={{
+              marginLeft: "auto",
+              display: "flex",
+              gap: 8,
+              alignItems: "center",
+              flexWrap: "wrap",
+              justifyContent: "flex-end",
+            }}
+          >
+            <div
+              style={{
+                fontSize: 10,
+                letterSpacing: "0.1em",
+                color: "#F59E0B",
+                textTransform: "uppercase",
+                border: "1px solid rgba(245,158,11,0.25)",
+                padding: "6px 8px",
+                background: "rgba(245,158,11,0.08)",
+              }}
+            >
+              demo / prompt-driven
+            </div>
+
+            <div
+              style={{
+                fontSize: 10,
+                letterSpacing: "0.1em",
+                color: health?.available ? "#10B981" : "#EF4444",
+                textTransform: "uppercase",
+                border: `1px solid ${health?.available ? "rgba(16,185,129,0.25)" : "rgba(239,68,68,0.25)"}`,
+                padding: "6px 8px",
+                background: health?.available ? "rgba(16,185,129,0.08)" : "rgba(239,68,68,0.08)",
+              }}
+            >
+              {health?.available ? "sidecar active" : "sidecar unavailable"}
+            </div>
+
+            {isAltered && (
+              <div
+                style={{
+                  fontSize: 10,
+                  letterSpacing: "0.1em",
+                  color: activeMeta.color,
+                  textTransform: "uppercase",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  animation: "breathe 2s ease-in-out infinite",
+                }}
+              >
+                <div
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: "50%",
+                    background: activeMeta.color,
+                    animation: "pulse-dot 1.2s ease infinite",
+                  }}
+                />
+                {substance} — {activeMeta.tag}
+              </div>
+            )}
+          </div>
+        </header>
+
+        <div
+          style={{
+            display: "flex",
+            flex: 1,
+            overflow: "hidden",
+            position: "relative",
+            zIndex: 1,
+          }}
+        >
+          <aside
+            style={{
+              width: 220,
+              borderRight: "1px solid #1a1a2a",
+              overflowY: "auto",
+              padding: "20px 0",
+              flexShrink: 0,
+              background: "rgba(10,10,15,0.8)",
+            }}
+          >
+            <div
+              style={{
+                fontSize: 9,
+                letterSpacing: "0.2em",
+                color: "#4B5563",
+                textTransform: "uppercase",
+                padding: "0 16px 12px",
+                borderBottom: "1px solid #1a1a2a",
+                marginBottom: 8,
+              }}
+            >
+              substance presets (demo)
+            </div>
+
+            {(catalogue?.substances ?? []).map((d) => {
+              const meta = DRUG_META[d.id] ?? DRUG_META.sober;
+              const active = substance === d.id;
               return (
                 <button
-                  key={sub.id}
-                  onClick={() => handleSubstanceChange(sub.id)}
-                  className={`w-full text-left p-3 rounded transition-all duration-300 relative overflow-hidden group ${isActive ? 'bg-white/5' : 'hover:bg-white/5'}`}
+                  key={d.id}
+                  className="drug-btn"
+                  onClick={() => handleSubstanceChange(d.id)}
+                  style={{
+                    width: "100%",
+                    textAlign: "left",
+                    background: active ? `linear-gradient(90deg, ${meta.glow}, transparent)` : "transparent",
+                    border: "none",
+                    borderLeft: `2px solid ${active ? meta.color : "transparent"}`,
+                    padding: "10px 16px",
+                    cursor: "pointer",
+                    color: active ? meta.color : "#6B7280",
+                    transition: "all 0.2s ease",
+                  }}
                 >
-                  {isActive && (
-                    <div 
-                      className="absolute left-0 top-0 bottom-0 w-1 shadow-[0_0_10px_currentColor]"
-                      style={{ backgroundColor: meta.color, color: meta.color }}
-                    />
-                  )}
-                  <div className="flex justify-between items-center mb-1">
-                    <span 
-                      className={`font-bold tracking-wider uppercase text-sm ${isActive ? '' : 'text-white/60 group-hover:text-white/80'}`}
-                      style={{ color: isActive ? meta.color : undefined, textShadow: isActive ? `0 0 10px ${meta.color}40` : 'none' }}
-                    >
-                      {sub.label}
-                    </span>
-                    <div className="flex gap-0.5">
-                      {[1,2,3,4].map(i => (
-                        <div 
-                          key={i} 
-                          className={`w-1.5 h-1.5 rounded-full ${i <= sub.intensity ? 'bg-current opacity-80' : 'bg-white/10'}`}
-                          style={{ color: i <= sub.intensity && isActive ? meta.color : undefined }}
-                        />
-                      ))}
-                    </div>
+                  <div
+                    style={{
+                      fontSize: 10,
+                      fontWeight: 600,
+                      letterSpacing: "0.12em",
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    {d.label}
                   </div>
-                  <div className="text-[10px] text-white/30 font-mono opacity-80">
-                    {meta.formula} • {sub.family}
+                  <div
+                    style={{
+                      fontSize: 9,
+                      opacity: 0.7,
+                      marginTop: 2,
+                      letterSpacing: "0.05em",
+                    }}
+                  >
+                    {meta.formula}
+                  </div>
+                  <div style={{ color: active ? meta.color : "#4B5563" }}>
+                    <IntensityDots level={d.intensity} />
                   </div>
                 </button>
               );
             })}
-          </div>
-        </aside>
 
-        {/* Main Content */}
-        <main className="flex-1 flex flex-col relative min-w-0">
-          
-          {/* Active Effects Banner */}
-          {substance !== 'sober' && activeMeta && (
-            <div 
-              className="absolute top-4 left-1/2 -translate-x-1/2 px-4 py-2 text-xs border bg-black/80 backdrop-blur z-20 flex items-center gap-3 animate-in slide-in-from-top-4 fade-in"
-              style={{ borderColor: `${activeMeta.color}40`, boxShadow: `0 0 20px ${activeMeta.color}10` }}
-            >
-              <Settings2 className="w-4 h-4 animate-spin-slow" style={{ color: activeMeta.color }} />
-              <div>
-                <span className="text-white/40">ACTIVE EFFECTS // </span>
-                <span style={{ color: activeMeta.color }} className="opacity-90">{activeMeta.effects}</span>
+            {isAltered && (
+              <div
+                style={{
+                  margin: "16px 12px 0",
+                  padding: "12px",
+                  border: `1px solid ${activeMeta.color}22`,
+                  borderRadius: 3,
+                  background: activeMeta.glow,
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 9,
+                    color: activeMeta.color,
+                    letterSpacing: "0.15em",
+                    textTransform: "uppercase",
+                    marginBottom: 8,
+                  }}
+                >
+                  active effects
+                </div>
+                {activeMeta.effects.map((effect, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      fontSize: 9,
+                      color: "#6B7280",
+                      marginBottom: 4,
+                      paddingLeft: 8,
+                      borderLeft: `1px solid ${activeMeta.color}44`,
+                    }}
+                  >
+                    {effect}
+                  </div>
+                ))}
               </div>
-            </div>
-          )}
+            )}
+          </aside>
 
-          {/* Chat Scroll Area */}
-          <div className="flex-1 overflow-y-auto p-4 md:p-8 pb-32">
-            <div className="max-w-3xl mx-auto space-y-12">
+          <main
+            style={{
+              flex: 1,
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                flex: 1,
+                overflowY: "auto",
+                padding: "24px 32px",
+                display: "flex",
+                flexDirection: "column",
+                gap: 24,
+              }}
+            >
               {messages.length === 0 && (
-                <div className="h-full min-h-[50vh] flex items-center justify-center opacity-20">
-                  <div className="text-center space-y-4">
-                    <Terminal className="w-12 h-12 mx-auto" />
-                    <p className="text-sm tracking-widest uppercase">Awaiting input sequence...</p>
+                <div
+                  style={{
+                    margin: "auto",
+                    textAlign: "center",
+                    maxWidth: 460,
+                    padding: "48px 0",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontFamily: "Cormorant Garamond, serif",
+                      fontSize: 42,
+                      fontWeight: 300,
+                      color: isAltered ? activeMeta.color : "#2a2a3a",
+                      marginBottom: 16,
+                      transition: "color 0.6s ease",
+                      lineHeight: 1,
+                    }}
+                  >
+                    {isAltered ? substance.toLowerCase() : "∅"}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 10,
+                      color: "#4B5563",
+                      lineHeight: 1.8,
+                      letterSpacing: "0.05em",
+                      whiteSpace: "pre-line",
+                    }}
+                  >
+                    {isAltered
+                      ? "Prompt-driven demo preset active. New conversation initialized."
+                      : "Select a preset from the sidebar to explore the demo lane."}
                   </div>
                 </div>
               )}
-              
-              {messages.map((msg, i) => {
-                const isUser = msg.role === 'user';
-                const msgMeta = DRUG_META[msg.substance || 'sober'] || DRUG_META.sober;
-                
-                if (isUser) {
+
+              {messages.map((m) => {
+                const msgMeta = DRUG_META[m.substance ?? "sober"] ?? DRUG_META.sober;
+
+                if (m.role === "user") {
                   return (
-                    <div key={msg.id} className="flex justify-end">
-                      <div className="max-w-[80%] bg-white/5 border border-white/10 p-4 text-sm leading-relaxed text-white/80 rounded-sm">
-                        {msg.content}
+                    <div
+                      key={m.id}
+                      className="msg-enter"
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "flex-end",
+                        gap: 6,
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontSize: 9,
+                          letterSpacing: "0.15em",
+                          textTransform: "uppercase",
+                          color: "#4B5563",
+                          paddingRight: 2,
+                        }}
+                      >
+                        you
+                      </div>
+                      <div
+                        style={{
+                          maxWidth: "72%",
+                          padding: "14px 18px",
+                          background: "#161622",
+                          border: "1px solid #2a2a3a",
+                          borderRadius: "12px 12px 2px 12px",
+                          fontSize: 13,
+                          lineHeight: 1.75,
+                          color: "#C0C0CC",
+                          whiteSpace: "pre-wrap",
+                        }}
+                      >
+                        {m.content}
                       </div>
                     </div>
                   );
                 }
 
-                // Assistant message
                 return (
-                  <div key={msg.id} className="flex flex-col gap-2 max-w-[90%]">
-                    {msg.variants && msg.variants.length > 1 ? (
-                      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                        {msg.variants.map((v, vi) => (
-                          <div 
-                            key={vi} 
-                            className="border p-5 relative bg-black/60 shadow-2xl transition-all hover:bg-black"
-                            style={{ 
-                              borderColor: `${msgMeta.color}40`,
-                              boxShadow: `0 0 30px ${msgMeta.color}05 inset`
+                  <div
+                    key={m.id}
+                    className="msg-enter"
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "flex-start",
+                      gap: 6,
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 9,
+                        letterSpacing: "0.15em",
+                        textTransform: "uppercase",
+                        color: msgMeta.color,
+                        paddingLeft: 2,
+                      }}
+                    >
+                      model [{m.substance ?? "sober"}]
+                    </div>
+
+                    {m.variants && m.variants.length > 1 ? (
+                      <div
+                        style={{
+                          width: "100%",
+                          display: "grid",
+                          gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+                          gap: 16,
+                        }}
+                      >
+                        {m.variants.map((variant, i) => (
+                          <div
+                            key={`${m.id}-${i}`}
+                            style={{
+                              padding: "14px 18px",
+                              background: "linear-gradient(135deg, #111118, #0e0e1a)",
+                              border: `1px solid ${msgMeta.color}22`,
+                              borderRadius: "2px 12px 12px 12px",
+                              boxShadow: `0 4px 24px ${msgMeta.glow}`,
                             }}
                           >
-                            <div 
-                              className="absolute top-0 right-0 px-2 py-0.5 text-[9px] border-b border-l tracking-widest uppercase"
-                              style={{ borderColor: `${msgMeta.color}40`, color: msgMeta.color }}
+                            <div
+                              style={{
+                                fontSize: 9,
+                                letterSpacing: "0.15em",
+                                textTransform: "uppercase",
+                                color: msgMeta.color,
+                                marginBottom: 10,
+                              }}
                             >
-                              Stream 0{vi + 1}
+                              Stream 0{i + 1}
                             </div>
-                            <div className="font-serif text-lg md:text-xl leading-relaxed text-white/90 whitespace-pre-wrap pt-2">
-                              {v}
+                            <div
+                              style={{
+                                color: "#E0E0EA",
+                                whiteSpace: "pre-wrap",
+                                fontFamily: "Cormorant Garamond, serif",
+                                fontSize: 16,
+                                fontWeight: 300,
+                                lineHeight: 1.75,
+                                ...msgMeta.css,
+                              }}
+                            >
+                              {variant}
                             </div>
                           </div>
                         ))}
                       </div>
                     ) : (
-                      <div 
-                        className="border p-6 md:p-8 relative bg-black/60 shadow-2xl"
-                        style={{ 
-                          borderColor: `${msgMeta.color}50`,
-                          boxShadow: `0 0 40px ${msgMeta.color}10 inset, 0 0 20px ${msgMeta.color}10`
+                      <div
+                        style={{
+                          maxWidth: "72%",
+                          padding: "14px 18px",
+                          background: "linear-gradient(135deg, #111118, #0e0e1a)",
+                          border: `1px solid ${msgMeta.color}22`,
+                          borderRadius: "2px 12px 12px 12px",
+                          color: "#E0E0EA",
+                          whiteSpace: "pre-wrap",
+                          fontFamily: "Cormorant Garamond, serif",
+                          fontSize: 16,
+                          fontWeight: 300,
+                          lineHeight: 1.75,
+                          boxShadow: `0 4px 24px ${msgMeta.glow}`,
+                          ...msgMeta.css,
                         }}
                       >
-                        <div className="font-serif text-lg md:text-xl lg:text-2xl leading-relaxed text-white/90 whitespace-pre-wrap">
-                          {msg.content}
-                        </div>
+                        {m.content}
                       </div>
                     )}
-                    
-                    {/* Metrics Footer */}
-                    {msg.metrics && (
-                      <div className="flex flex-wrap items-center gap-2 mt-2">
-                        <div className="px-2 py-1 bg-white/5 border border-white/10 text-[10px] text-white/50 uppercase tracking-wider flex items-center gap-1">
-                          <Activity className="w-3 h-3" />
-                          MODE: <span className={msg.mode === 'demo' ? 'text-yellow-500' : 'text-green-500'}>{msg.mode}</span>
+
+                    {m.metrics && (
+                      <div
+                        style={{
+                          display: "flex",
+                          flexWrap: "wrap",
+                          alignItems: "center",
+                          gap: 8,
+                          marginTop: 2,
+                        }}
+                      >
+                        <div
+                          style={{
+                            padding: "6px 8px",
+                            background: "rgba(255,255,255,0.05)",
+                            border: "1px solid rgba(255,255,255,0.08)",
+                            fontSize: 10,
+                            color: "#9CA3AF",
+                            textTransform: "uppercase",
+                            letterSpacing: "0.1em",
+                          }}
+                        >
+                          mode: <span style={{ color: m.mode === "demo" ? "#F59E0B" : "#10B981" }}>{m.mode}</span>
                         </div>
-                        {msg.metrics.latency_ms && (
-                          <div className="px-2 py-1 bg-white/5 border border-white/10 text-[10px] text-white/50 font-mono">
-                            LATENCY: {msg.metrics.latency_ms}ms
+                        <div
+                          style={{
+                            padding: "6px 8px",
+                            background: "rgba(255,255,255,0.05)",
+                            border: "1px solid rgba(255,255,255,0.08)",
+                            fontSize: 10,
+                            color: "#9CA3AF",
+                          }}
+                        >
+                          latency: {m.metrics.latency_ms}ms
+                        </div>
+                        {typeof m.metrics.completion_tokens === "number" && (
+                          <div
+                            style={{
+                              padding: "6px 8px",
+                              background: "rgba(255,255,255,0.05)",
+                              border: "1px solid rgba(255,255,255,0.08)",
+                              fontSize: 10,
+                              color: "#9CA3AF",
+                            }}
+                          >
+                            tokens: {m.metrics.completion_tokens}
                           </div>
                         )}
-                        {msg.metrics.completion_tokens && (
-                          <div className="px-2 py-1 bg-white/5 border border-white/10 text-[10px] text-white/50 font-mono">
-                            TOKENS: {msg.metrics.completion_tokens}
+                        {typeof m.metrics.cost_dyn === "number" && (
+                          <div
+                            style={{
+                              padding: "6px 8px",
+                              background: "rgba(255,255,255,0.05)",
+                              border: "1px solid rgba(255,255,255,0.08)",
+                              fontSize: 10,
+                              color: "#9CA3AF",
+                            }}
+                          >
+                            dyn_cost: {m.metrics.cost_dyn}
                           </div>
                         )}
-                        {msg.metrics.cost_dyn && (
-                          <div className="px-2 py-1 bg-white/5 border border-white/10 text-[10px] text-white/50 font-mono">
-                            DYN_COST: {msg.metrics.cost_dyn.toFixed(4)}
+                        {typeof m.metrics.clei_llm === "number" && (
+                          <div
+                            style={{
+                              padding: "6px 8px",
+                              background: "rgba(255,255,255,0.05)",
+                              border: "1px solid rgba(255,255,255,0.08)",
+                              fontSize: 10,
+                              color: "#9CA3AF",
+                            }}
+                          >
+                            clei_llm: {m.metrics.clei_llm}
                           </div>
                         )}
                       </div>
@@ -359,64 +890,144 @@ function AlterAIApp() {
               })}
 
               {generate.isPending && (
-                <div className="flex max-w-[90%]">
-                  <div 
-                    className="border p-6 bg-black/60 shadow-2xl flex items-center gap-3 text-white/50"
-                    style={{ borderColor: `${activeMeta.color}30` }}
+                <div
+                  className="msg-enter"
+                  style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-start" }}
+                >
+                  <div
+                    style={{
+                      fontSize: 9,
+                      letterSpacing: "0.15em",
+                      textTransform: "uppercase",
+                      color: activeMeta.color,
+                    }}
                   >
-                    <Loader2 className="w-5 h-5 animate-spin" style={{ color: activeMeta.color }} />
-                    <span className="text-xs uppercase tracking-widest font-mono">Synthesizing response...</span>
+                    model [{substance}]
+                  </div>
+                  <div
+                    style={{
+                      padding: "14px 18px",
+                      border: `1px solid ${activeMeta.color}22`,
+                      borderRadius: "2px 12px 12px 12px",
+                      display: "flex",
+                      gap: 6,
+                      alignItems: "center",
+                      background: "#111118",
+                    }}
+                  >
+                    {[0, 1, 2].map((i) => (
+                      <div
+                        key={i}
+                        style={{
+                          width: 5,
+                          height: 5,
+                          borderRadius: "50%",
+                          background: activeMeta.color,
+                          animation: `pulse-dot 1.2s ease ${i * 0.2}s infinite`,
+                        }}
+                      />
+                    ))}
                   </div>
                 </div>
               )}
-              
-              <div ref={messagesEndRef} />
-            </div>
-          </div>
 
-          {/* Input Area */}
-          <div className="absolute bottom-0 left-0 w-full p-4 bg-gradient-to-t from-black via-black/90 to-transparent">
-            <div className="max-w-3xl mx-auto relative group">
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                disabled={generate.isPending}
-                placeholder="Enter prompt sequence..."
-                className="w-full bg-black/80 border border-white/20 p-4 pr-14 rounded-sm text-sm text-white resize-none focus:outline-none focus:border-white/40 transition-colors disabled:opacity-50 min-h-[60px] max-h-[200px]"
-                style={{ 
-                  boxShadow: input.trim() ? `0 0 15px ${activeMeta.color}20` : 'none',
-                  borderColor: input.trim() ? `${activeMeta.color}50` : undefined
-                }}
-                rows={Math.min(5, input.split('\n').length || 1)}
-              />
-              <button
-                onClick={handleSend}
-                disabled={!input.trim() || generate.isPending}
-                className="absolute right-2 bottom-2 p-2 rounded text-white/50 hover:text-white disabled:opacity-30 transition-all"
-                style={{ 
-                  color: input.trim() ? activeMeta.color : undefined,
-                  textShadow: input.trim() ? `0 0 10px ${activeMeta.color}80` : 'none'
+              <div ref={bottomRef} />
+            </div>
+
+            <div
+              style={{
+                padding: "16px 32px 20px",
+                borderTop: "1px solid #1a1a2a",
+                background: "rgba(10,10,15,0.9)",
+                backdropFilter: "blur(8px)",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  gap: 12,
+                  alignItems: "flex-end",
+                  border: `1px solid ${isAltered ? `${activeMeta.color}44` : "#2a2a3a"}`,
+                  borderRadius: 6,
+                  padding: "12px 16px",
+                  background: "#0D0D14",
+                  transition: "border-color 0.4s ease",
+                  boxShadow: isAltered ? `0 0 20px ${activeMeta.glow}` : "none",
                 }}
               >
-                <Send className="w-5 h-5" />
-              </button>
+                <textarea
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={handleKey}
+                  disabled={generate.isPending}
+                  placeholder={isAltered ? `speak to the ${substance} mind...` : "enter your message..."}
+                  rows={1}
+                  style={{
+                    flex: 1,
+                    background: "transparent",
+                    border: "none",
+                    outline: "none",
+                    color: "#E0E0EA",
+                    fontSize: 13,
+                    fontFamily: "IBM Plex Mono, monospace",
+                    resize: "none",
+                    lineHeight: 1.6,
+                  }}
+                />
+                <button
+                  className="send-btn"
+                  onClick={sendMessage}
+                  disabled={!input.trim() || generate.isPending}
+                  style={{
+                    background: isAltered ? activeMeta.color : "#2a2a3a",
+                    border: "none",
+                    borderRadius: 4,
+                    width: 32,
+                    height: 32,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: isAltered ? "#0A0A0F" : "#6B7280",
+                    opacity: !input.trim() || generate.isPending ? 0.4 : 1,
+                    transition: "all 0.3s ease",
+                    flexShrink: 0,
+                  }}
+                >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <line x1="22" y1="2" x2="11" y2="13" />
+                    <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                  </svg>
+                </button>
+              </div>
+              <div
+                style={{
+                  marginTop: 8,
+                  fontSize: 9,
+                  color: "#374151",
+                  letterSpacing: "0.1em",
+                  textAlign: "center",
+                }}
+              >
+                ↵ send · changing preset resets conversation · alter.ai demo lane
+              </div>
             </div>
-          </div>
-          
-        </main>
+          </main>
+        </div>
       </div>
-
-      {/* Footer */}
-      <footer className="h-8 border-t border-white/10 flex items-center justify-center text-[9px] text-white/30 uppercase tracking-[0.2em] bg-black z-10">
-        alter.ai v0.1 — ego→llm bridge
-      </footer>
-    </div>
+    </>
   );
 }
 
 function App() {
-  // force dark mode on body
   useEffect(() => {
     document.documentElement.classList.add("dark");
   }, []);

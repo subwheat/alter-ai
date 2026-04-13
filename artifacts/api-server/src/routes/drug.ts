@@ -41,49 +41,48 @@ router.post("/drug", async (req, res) => {
 
   const available = await isSidecarAvailable();
 
-  if (available) {
-    try {
-      const sidecarRes = await sidecarGenerate({
-        prompt,
-        substance: substance.id,
-        sampling_config: substance.sampling_config,
-        system_prompt: substance.system_prompt,
-        messages,
-        replicate_count: replicates,
-      });
+  if (!available) {
+    req.log.error("Sidecar unavailable in production path");
+    res.status(503).json({
+      error: "sidecar unavailable",
+      mode: "sidecar_required",
+    });
+    return;
+  }
 
-      texts = sidecarRes.texts;
-      promptTokens = sidecarRes.prompt_tokens;
-      completionTokens = sidecarRes.completion_tokens;
-      latencyMs = sidecarRes.latency_ms;
-      prefillMs = sidecarRes.prefill_ms;
-      decodeMs = sidecarRes.decode_ms;
-      firstTokenMs = sidecarRes.first_token_ms;
-      tokensPerSecond = sidecarRes.tokens_per_second;
-      peakVramGb = sidecarRes.peak_vram_gb;
-      modelName = sidecarRes.model_name;
-      modelPath = sidecarRes.model_path;
-      dtype = sidecarRes.dtype;
-      device = sidecarRes.device;
-      finishReasons = sidecarRes.finish_reasons;
-      tokenMetricsPerReplicate = sidecarRes.token_metrics_per_replicate ?? [];
-      mode = "sidecar";
-    } catch (err) {
-      req.log.warn({ err }, "Sidecar call failed, falling back to demo");
-      const demo = buildDemoResponse(substance, replicates);
-      texts = demo.texts;
-      promptTokens = demo.prompt_tokens;
-      completionTokens = demo.completion_tokens;
-      latencyMs = demo.latency_ms;
-      finishReasons = texts.map(() => "stop");
-    }
-  } else {
-    const demo = buildDemoResponse(substance, replicates);
-    texts = demo.texts;
-    promptTokens = demo.prompt_tokens;
-    completionTokens = demo.completion_tokens;
-    latencyMs = demo.latency_ms;
-    finishReasons = texts.map(() => "stop");
+  try {
+    const sidecarRes = await sidecarGenerate({
+      prompt,
+      substance: substance.id,
+      sampling_config: substance.sampling_config,
+      system_prompt: substance.system_prompt,
+      messages,
+      replicate_count: replicates,
+    });
+
+    texts = sidecarRes.texts;
+    promptTokens = sidecarRes.prompt_tokens;
+    completionTokens = sidecarRes.completion_tokens;
+    latencyMs = sidecarRes.latency_ms;
+    prefillMs = sidecarRes.prefill_ms;
+    decodeMs = sidecarRes.decode_ms;
+    firstTokenMs = sidecarRes.first_token_ms;
+    tokensPerSecond = sidecarRes.tokens_per_second;
+    peakVramGb = sidecarRes.peak_vram_gb;
+    modelName = sidecarRes.model_name;
+    modelPath = sidecarRes.model_path;
+    dtype = sidecarRes.dtype;
+    device = sidecarRes.device;
+    finishReasons = sidecarRes.finish_reasons;
+    tokenMetricsPerReplicate = sidecarRes.token_metrics_per_replicate ?? [];
+    mode = "sidecar";
+  } catch (err) {
+    req.log.error({ err }, "Sidecar call failed in production path");
+    res.status(503).json({
+      error: err instanceof Error ? err.message : "sidecar call failed",
+      mode: "sidecar_required",
+    });
+    return;
   }
 
   const totalCompletionTokens = completionTokens.reduce((a, b) => a + b, 0);
@@ -97,6 +96,7 @@ router.post("/drug", async (req, res) => {
     peak_vram_gb: peakVramGb ?? undefined,
     texts,
     substance_intensity: substance.intensity,
+    token_metrics_per_replicate: tokenMetricsPerReplicate,
   });
 
   for (let i = 0; i < texts.length; i++) {

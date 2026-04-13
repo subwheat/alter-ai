@@ -33,6 +33,12 @@
  * recoverability_est: Placeholder — requires multi-step rollout (not yet implemented)
  */
 
+export interface TokenMetricsAggregateInput {
+  mean_logprob?: number | null;
+  mean_entropy?: number | null;
+  mean_margin_top1_top2?: number | null;
+}
+
 export interface EgoRunInput {
   prefill_ms?: number;
   decode_ms?: number;
@@ -42,6 +48,7 @@ export interface EgoRunInput {
   peak_vram_gb?: number;
   texts: string[];
   substance_intensity: number;
+  token_metrics_per_replicate?: (TokenMetricsAggregateInput | null)[];
 }
 
 export interface EgoMetricsResult {
@@ -91,12 +98,81 @@ function computeREffProxy(texts: string[]): number | null {
   return Math.min(cv * texts.length, texts.length);
 }
 
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value));
+}
+
+function meanOrNull(values: Array<number | null | undefined>): number | null {
+  const xs = values.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+  if (xs.length === 0) return null;
+  return xs.reduce((a, b) => a + b, 0) / xs.length;
+}
+
+function aggregateTokenMetrics(
+  summaries: (TokenMetricsAggregateInput | null)[] | undefined
+): TokenMetricsAggregateInput | null {
+  if (!summaries || summaries.length === 0) return null;
+
+  const mean_logprob = meanOrNull(summaries.map((s) => s?.mean_logprob));
+  const mean_entropy = meanOrNull(summaries.map((s) => s?.mean_entropy));
+  const mean_margin_top1_top2 = meanOrNull(
+    summaries.map((s) => s?.mean_margin_top1_top2)
+  );
+
+  if (
+    mean_logprob === null &&
+    mean_entropy === null &&
+    mean_margin_top1_top2 === null
+  ) {
+    return null;
+  }
+
+  return {
+    mean_logprob,
+    mean_entropy,
+    mean_margin_top1_top2,
+  };
+}
+
 function computeCLEI(
   texts: string[],
   lmi: number | null,
-  intensityNorm: number
+  intensityNorm: number,
+  aggregatedTokenMetrics: TokenMetricsAggregateInput | null
 ): number | null {
   if (texts.length === 0) return null;
+
+  if (aggregatedTokenMetrics) {
+    const entropyStress =
+      aggregatedTokenMetrics.mean_entropy !== null &&
+      aggregatedTokenMetrics.mean_entropy !== undefined
+        ? clamp01(aggregatedTokenMetrics.mean_entropy / 2.5)
+        : null;
+
+    const lowConfidence =
+      aggregatedTokenMetrics.mean_logprob !== null &&
+      aggregatedTokenMetrics.mean_logprob !== undefined
+        ? clamp01((-aggregatedTokenMetrics.mean_logprob) / 5)
+        : null;
+
+    const lowMargin =
+      aggregatedTokenMetrics.mean_margin_top1_top2 !== null &&
+      aggregatedTokenMetrics.mean_margin_top1_top2 !== undefined
+        ? 1 - clamp01(aggregatedTokenMetrics.mean_margin_top1_top2)
+        : null;
+
+    const hasRealSignal =
+      entropyStress !== null || lowConfidence !== null || lowMargin !== null;
+
+    if (hasRealSignal) {
+      const clei =
+        0.45 * (entropyStress ?? 0) +
+        0.2 * (lowConfidence ?? 0) +
+        0.35 * (lowMargin ?? 0);
+      return clamp01(clei);
+    }
+  }
+
   const lengths = texts.map((t) => t.length);
   const meanLen = lengths.reduce((a, b) => a + b, 0) / lengths.length;
   const lenStability =
@@ -110,7 +186,7 @@ function computeCLEI(
       : 1;
   const lmiWeight = lmi ?? 0;
   const clei = 0.4 * lmiWeight + 0.3 * (1 - lenStability) + 0.3 * intensityNorm;
-  return Math.min(1, Math.max(0, clei));
+  return clamp01(clei);
 }
 
 export function computeEgoMetrics(input: EgoRunInput): EgoMetricsResult {
@@ -123,6 +199,7 @@ export function computeEgoMetrics(input: EgoRunInput): EgoMetricsResult {
     peak_vram_gb,
     texts,
     substance_intensity,
+    token_metrics_per_replicate,
   } = input;
 
   const prefill = prefill_ms ?? latency_ms * 0.2;
@@ -142,7 +219,13 @@ export function computeEgoMetrics(input: EgoRunInput): EgoMetricsResult {
   const lmi_empirical = computeLMI(texts);
   const r_eff_empirical = computeREffProxy(texts);
   const intensityNorm = substance_intensity / 4;
-  const clei_llm = computeCLEI(texts, lmi_empirical, intensityNorm);
+  const aggregatedTokenMetrics = aggregateTokenMetrics(token_metrics_per_replicate);
+  const clei_llm = computeCLEI(
+    texts,
+    lmi_empirical,
+    intensityNorm,
+    aggregatedTokenMetrics
+  );
 
   return {
     cost_dyn: Math.round(cost_dyn * 100) / 100,
