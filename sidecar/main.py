@@ -1,10 +1,8 @@
 """
-alter.ai — Gemma 4 Local Inference Sidecar v0.1
+alter.ai — Gemma 4 Local Inference Sidecar v0.2
 ================================================
 FastAPI service that loads a local Gemma 4 (E4B-it) model from block storage
 and exposes generation endpoints for substance-modulated text generation.
-
-The Node.js API server calls this sidecar at http://localhost:8090.
 
 Usage:
     uvicorn main:app --host 0.0.0.0 --port 8090
@@ -18,11 +16,12 @@ Environment variables:
     ALTER_AI_LOGS_DIR       Path to write JSONL logs
     SIDECAR_PORT            Port to listen on (default: 8090)
 
-Patches / features:
-    BUG-01  tokenizer_config.json extra_special_tokens patched on block storage
-    N3      /generate_mechanical — lane mécanique niveau 1 (décodage)
-    N4      LogitsProcessor hooks — intervention post-forward, pré-sampling
-            Hooks: additive_noise | logit_flatten | logit_sharpen | margin_compress
+Changelog:
+    v0.1  initial — /generate, /generate_mechanical N3
+    v0.1  N4 LogitsProcessor hooks (additive_noise, flatten, sharpen, margin_compress)
+    v0.2  seed support in MechanicalRequest (torch.manual_seed before generation)
+          transformers_version exposed in /health and MechanicalResponse
+          BUG-01 fix: PreTrainedTokenizerFast (tokenizer_config patched on block storage)
 """
 
 import datetime
@@ -38,6 +37,7 @@ from typing import Optional
 
 import numpy as np
 import torch
+import transformers
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -64,6 +64,7 @@ DTYPE_MAP = {
     "float32": torch.float32,
 }
 TORCH_DTYPE = DTYPE_MAP.get(DTYPE_STR, torch.bfloat16)
+TRANSFORMERS_VERSION = transformers.__version__
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("alter-ai-sidecar")
@@ -79,20 +80,19 @@ model_name_str = None
 
 
 def load_model():
-    """Load the Gemma 4 model from block storage into GPU/CPU memory."""
     global tokenizer, model, model_device, model_name_str
 
     if not MODEL_PATH or not Path(MODEL_PATH).exists():
         raise RuntimeError(
             f"Model path not found: {MODEL_PATH!r}. "
-            "Set ALTER_AI_MODEL_PATH to a valid directory containing Gemma 4 weights."
+            "Set ALTER_AI_MODEL_PATH to a valid directory."
         )
 
     log.info(f"Loading tokenizer from {MODEL_PATH}")
     tokenizer = PreTrainedTokenizerFast.from_pretrained(MODEL_PATH, local_files_only=True)
 
     device_map = DEVICE if DEVICE != "auto" else "auto"
-    log.info(f"Loading model from {MODEL_PATH} (dtype={DTYPE_STR}, device={device_map})")
+    log.info(f"Loading model (dtype={DTYPE_STR}, device={device_map})")
     t0 = time.time()
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_PATH,
@@ -101,8 +101,7 @@ def load_model():
         local_files_only=True,
     )
     model.eval()
-    elapsed = time.time() - t0
-    log.info(f"Model loaded in {elapsed:.1f}s")
+    log.info(f"Model loaded in {time.time() - t0:.1f}s")
 
     try:
         model_device = str(next(model.parameters()).device)
@@ -129,7 +128,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="alter.ai Gemma 4 Sidecar", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="alter.ai Gemma 4 Sidecar", version="0.2.0", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -160,12 +159,6 @@ class GenerateRequest(BaseModel):
 
 
 class TokenMetricsSummary(BaseModel):
-    """Run-level aggregation of per-token statistics.
-
-    Thresholds:
-        low_margin : margin_top1_top2 < 0.10
-        high_entropy: entropy > ln(10) ~ 2.3026
-    """
     mean_logprob: Optional[float]
     mean_entropy: Optional[float]
     mean_margin_top1_top2: Optional[float]
@@ -176,7 +169,7 @@ class TokenMetricsSummary(BaseModel):
 
 
 LOW_MARGIN_THRESHOLD = 0.10
-HIGH_ENTROPY_THRESHOLD = 2.3026
+HIGH_ENTROPY_THRESHOLD = 2.3026  # ln(10)
 
 
 def aggregate_token_metrics(trace: list[dict]) -> TokenMetricsSummary:
@@ -237,8 +230,7 @@ def append_trace_log(run_id: str, entries: list[dict]):
     traces_dir = LOGS_DIR.parent / "traces"
     try:
         traces_dir.mkdir(parents=True, exist_ok=True)
-        trace_file = traces_dir / f"{run_id}.tokens.jsonl"
-        with open(trace_file, "w") as f:
+        with open(traces_dir / f"{run_id}.tokens.jsonl", "w") as f:
             for entry in entries:
                 f.write(json.dumps(entry) + "\n")
     except Exception:
@@ -271,30 +263,20 @@ def get_peak_vram_gb() -> Optional[float]:
 
 # ---------------------------------------------------------------------------
 # N4 — LogitsProcessor hooks
-# Post-forward, pre-sampling intervention on the logit tensor.
-# Applied BEFORE temperature/top-k/top-p warping in HF pipeline.
+# Post-forward, pre-sampling. Applied before temperature/top-k/top-p warping.
 # ---------------------------------------------------------------------------
 
 class AdditiveNoiseProcessor(LogitsProcessor):
-    """
-    Add Gaussian noise N(0, noise_std) to raw logits.
-    Simulates stochastic perturbation of the logit surface.
-    Expected: mean_entropy up, mean_margin down, variance up.
-    """
+    """Add Gaussian noise N(0, noise_std) to logits. Expected: entropy ↑, margin ↓."""
     def __init__(self, noise_std: float):
         self.noise_std = noise_std
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        noise = torch.randn_like(scores) * self.noise_std
-        return scores + noise
+        return scores + torch.randn_like(scores) * self.noise_std
 
 
 class LogitFlattenProcessor(LogitsProcessor):
-    """
-    Multiply logits by scale in (0, 1] — flattens the distribution.
-    Equivalent to an internal temperature > 1 applied before external temperature.
-    Expected: mean_entropy up, mean_margin down.
-    """
+    """Scale logits by scale in (0,1] — flattens distribution. Expected: entropy ↑↑, margin ↓↓."""
     def __init__(self, scale: float):
         self.scale = scale
 
@@ -303,11 +285,7 @@ class LogitFlattenProcessor(LogitsProcessor):
 
 
 class LogitSharpenProcessor(LogitsProcessor):
-    """
-    Multiply logits by scale >= 1 — sharpens the distribution.
-    Equivalent to an internal temperature < 1 applied before external temperature.
-    Expected: mean_entropy down, mean_margin up.
-    """
+    """Scale logits by scale >= 1 — sharpens distribution. Expected: entropy ↓↓, margin ↑↑."""
     def __init__(self, scale: float):
         self.scale = scale
 
@@ -316,11 +294,7 @@ class LogitSharpenProcessor(LogitsProcessor):
 
 
 class MarginCompressProcessor(LogitsProcessor):
-    """
-    Pull all logits toward the maximum logit by compress_factor.
-    compress_factor=0: no effect. compress_factor->1: all logits converge to max.
-    Expected: mean_margin down, num_low_margin_steps up.
-    """
+    """Pull all logits toward max by compress_factor. Expected: margin ↓↓, num_low_margin ↑↑."""
     def __init__(self, compress_factor: float):
         self.compress_factor = compress_factor
 
@@ -330,15 +304,6 @@ class MarginCompressProcessor(LogitsProcessor):
 
 
 def build_logits_processor(hook_type: str, hook_params: dict) -> Optional[LogitsProcessor]:
-    """
-    Factory for N4 logits processors.
-
-    hook_type options:
-        additive_noise  — noise_std: float (e.g. 1.0)
-        logit_flatten   — scale: float in (0, 1]
-        logit_sharpen   — scale: float >= 1
-        margin_compress — compress_factor: float in [0, 1)
-    """
     if hook_type == "additive_noise":
         return AdditiveNoiseProcessor(noise_std=float(hook_params.get("noise_std", 1.0)))
     elif hook_type == "logit_flatten":
@@ -351,7 +316,7 @@ def build_logits_processor(hook_type: str, hook_params: dict) -> Optional[Logits
 
 
 # ---------------------------------------------------------------------------
-# Core generation function
+# Core generation
 # ---------------------------------------------------------------------------
 
 def generate_one(
@@ -360,12 +325,20 @@ def generate_one(
     run_id: str,
     replicate_index: int,
     logits_processor_list: Optional[LogitsProcessorList] = None,
+    seed: Optional[int] = None,
 ) -> tuple[str, int, list[dict], str]:
     """
-    Run one generation pass. Returns (text, n_tokens, token_trace, finish_reason).
-    logits_processor_list: optional N4 hooks, applied post-forward pre-sampling.
+    Run one generation pass.
+    seed: if set, calls torch.manual_seed + torch.cuda.manual_seed before generation.
+    Returns (text, n_tokens, token_trace, finish_reason).
     """
     assert model is not None and tokenizer is not None
+
+    # Seed support — set before generation for reproducibility
+    if seed is not None:
+        torch.manual_seed(seed + replicate_index)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed + replicate_index)
 
     gen_kwargs: dict = {
         "input_ids": input_ids,
@@ -395,8 +368,7 @@ def generate_one(
     text = tokenizer.decode(generated_ids, skip_special_tokens=True)
 
     trace = []
-    scores = output.scores
-    for t_idx, (token_id, score_tensor) in enumerate(zip(generated_ids, scores)):
+    for t_idx, (token_id, score_tensor) in enumerate(zip(generated_ids, output.scores)):
         logits_row = score_tensor[0]
         probs = torch.softmax(logits_row.float(), dim=-1)
         log_probs = torch.log(probs + 1e-12)
@@ -405,7 +377,6 @@ def generate_one(
         topk = torch.topk(probs, k=2)
         top1_prob = float(topk.values[0].item())
         top2_prob = float(topk.values[1].item()) if len(topk.values) > 1 else 0.0
-        margin = top1_prob - top2_prob
         trace.append({
             "t": t_idx,
             "token_id": int(token_id.item()),
@@ -414,7 +385,7 @@ def generate_one(
             "entropy": round(entropy, 6),
             "top1_prob": round(top1_prob, 6),
             "top2_prob": round(top2_prob, 6),
-            "margin_top1_top2": round(margin, 6),
+            "margin_top1_top2": round(top1_prob - top2_prob, 6),
             "latency_ms": round((t_end - t_start) * 1000 / max(n_tokens, 1), 3),
         })
 
@@ -432,9 +403,16 @@ async def health():
     if model is None:
         return JSONResponse({
             "available": False, "model": None, "device": None,
-            "error": "Model not loaded. Check ALTER_AI_MODEL_PATH.",
+            "error": "Model not loaded.",
+            "transformers_version": TRANSFORMERS_VERSION,
         })
-    return {"available": True, "model": model_name_str, "device": model_device, "error": None}
+    return {
+        "available": True,
+        "model": model_name_str,
+        "device": model_device,
+        "error": None,
+        "transformers_version": TRANSFORMERS_VERSION,
+    }
 
 
 @app.post("/generate", response_model=GenerateResponse)
@@ -443,16 +421,16 @@ async def generate(req: GenerateRequest):
         raise HTTPException(503, detail="Model not loaded")
 
     full_prompt = build_chat_input(req.system_prompt, req.messages, req.prompt)
-    input_ids = tokenizer(full_prompt, return_tensors="pt").input_ids
-    input_ids = input_ids.to(model_device or "cpu")
+    input_ids = tokenizer(full_prompt, return_tensors="pt").input_ids.to(model_device or "cpu")
     n_prompt_tokens = input_ids.shape[1]
 
     texts, completion_token_counts, per_replicate_traces, finish_reasons = [], [], [], []
     t_wall_start = time.perf_counter()
 
     for i in range(req.replicate_count):
-        run_id_rep = f"{req.substance}-{uuid.uuid4().hex[:8]}"
-        text, n_tok, trace, fr = generate_one(input_ids, req.sampling_config, run_id_rep, i)
+        text, n_tok, trace, fr = generate_one(
+            input_ids, req.sampling_config, f"{req.substance}-{uuid.uuid4().hex[:8]}", i
+        )
         texts.append(text)
         completion_token_counts.append(n_tok)
         per_replicate_traces.append(trace)
@@ -462,7 +440,6 @@ async def generate(req: GenerateRequest):
     latency_ms = round((t_wall_end - t_wall_start) * 1000, 1)
     tokens_per_second = round(sum(completion_token_counts) / max(t_wall_end - t_wall_start, 0.001), 1)
     peak_vram_gb = get_peak_vram_gb()
-    token_metrics_per_replicate = [aggregate_token_metrics(t) for t in per_replicate_traces]
 
     run_trace_id = f"{req.substance}-{uuid.uuid4().hex[:8]}"
     ensure_logs_dir()
@@ -475,7 +452,7 @@ async def generate(req: GenerateRequest):
         tokens_per_second=tokens_per_second, peak_vram_gb=peak_vram_gb,
         finish_reasons=finish_reasons, model_name=model_name_str or "unknown",
         model_path=MODEL_PATH, dtype=DTYPE_STR, device=model_device or "unknown",
-        token_metrics_per_replicate=token_metrics_per_replicate,
+        token_metrics_per_replicate=[aggregate_token_metrics(t) for t in per_replicate_traces],
     )
 
 
@@ -486,7 +463,6 @@ async def generate(req: GenerateRequest):
 NEUTRAL_SYSTEM_PROMPT = "You are a helpful assistant. Answer clearly and concisely."
 NEUTRAL_PROMPT_HASH = "neutral_v1"
 
-# N3 — décodage presets
 MECHANICAL_PRESETS: dict[str, dict] = {
     "baseline":         {"temperature": 1.0, "top_p": 0.95, "top_k": 64,  "repetition_penalty": 1.0, "max_new_tokens": 256, "do_sample": True},
     "entropy_up":       {"temperature": 1.8, "top_p": 0.99, "top_k": 0,   "repetition_penalty": 1.0, "max_new_tokens": 256, "do_sample": True},
@@ -495,8 +471,6 @@ MECHANICAL_PRESETS: dict[str, dict] = {
     "repetition_loose": {"temperature": 1.0, "top_p": 0.95, "top_k": 64,  "repetition_penalty": 1.5, "max_new_tokens": 256, "do_sample": True},
 }
 
-# N4 — logits presets (hook type + params)
-# Used with neutral sampling so that only the hook varies.
 LOGITS_PRESETS: dict[str, dict] = {
     "noise_low":              {"hook": "additive_noise",  "noise_std": 0.5},
     "noise_high":             {"hook": "additive_noise",  "noise_std": 2.0},
@@ -508,7 +482,6 @@ LOGITS_PRESETS: dict[str, dict] = {
     "margin_compress_strong": {"hook": "margin_compress", "compress_factor": 0.92},
 }
 
-# Neutral sampling — used for N4 pure logits runs
 NEUTRAL_SAMPLING_PARAMS = {
     "temperature": 1.0, "top_p": 1.0, "top_k": 0,
     "repetition_penalty": 1.0, "max_new_tokens": 256, "do_sample": True,
@@ -520,14 +493,12 @@ class MechanicalRequest(BaseModel):
     preset: str = Field(default="baseline")
     replicate_count: int = Field(default=1, ge=1, le=8)
     override_sampling: Optional[dict] = None
-    # N4 fields
-    logits_hook: Optional[str] = Field(
+    logits_hook: Optional[str] = None
+    logits_hook_params: Optional[dict] = None
+    # v0.2: seed for reproducibility
+    seed: Optional[int] = Field(
         default=None,
-        description="N4 logits preset key, e.g. 'noise_high', 'flatten_mild', 'margin_compress'",
-    )
-    logits_hook_params: Optional[dict] = Field(
-        default=None,
-        description="Override params for the logits hook, e.g. {'noise_std': 1.5}",
+        description="RNG seed applied via torch.manual_seed before each replicate (seed + replicate_index).",
     )
 
 
@@ -544,12 +515,14 @@ class MechanicalResponse(BaseModel):
     model_name: str
     dtype: str
     device: str
+    transformers_version: str
     lane: str
-    hook_level: str             # "decode" | "logits"
+    hook_level: str
     preset: str
     preset_params: dict
     logits_hook: Optional[str]
     logits_hook_params: Optional[dict]
+    seed: Optional[int]
     neutral_prompt_hash: str
     token_metrics_per_replicate: list[TokenMetricsSummary]
 
@@ -557,11 +530,12 @@ class MechanicalResponse(BaseModel):
 @app.post("/generate_mechanical", response_model=MechanicalResponse)
 async def generate_mechanical(req: MechanicalRequest):
     """
-    Lane mécanique — perturbations décodage (N3) et/ou hooks logits (N4).
+    Lane mécanique N3/N4.
 
     N3 only  : set preset, leave logits_hook=None
     N4 only  : set logits_hook (neutral sampling used automatically)
-    N3 + N4  : set both preset and logits_hook
+    N3 + N4  : set both
+    seed     : if set, torch.manual_seed(seed + replicate_index) before each generation
     """
     if model is None or tokenizer is None:
         raise HTTPException(503, detail="Model not loaded")
@@ -569,8 +543,6 @@ async def generate_mechanical(req: MechanicalRequest):
     if req.preset not in MECHANICAL_PRESETS:
         raise HTTPException(400, detail=f"Unknown preset '{req.preset}'. Valid: {list(MECHANICAL_PRESETS.keys())}")
 
-    # If logits_hook is set and preset is still default baseline,
-    # use neutral sampling so only the hook varies.
     if req.logits_hook is not None and req.preset == "baseline":
         preset_params = dict(NEUTRAL_SAMPLING_PARAMS)
     else:
@@ -583,22 +555,17 @@ async def generate_mechanical(req: MechanicalRequest):
 
     cfg = SamplingConfig(**preset_params)
 
-    # Resolve N4 logits processor
     active_logits_hook: Optional[str] = None
     active_hook_params: Optional[dict] = None
     lp_list: Optional[LogitsProcessorList] = None
 
     if req.logits_hook is not None:
         if req.logits_hook not in LOGITS_PRESETS:
-            raise HTTPException(
-                400,
-                detail=f"Unknown logits_hook '{req.logits_hook}'. Valid: {list(LOGITS_PRESETS.keys())}",
-            )
+            raise HTTPException(400, detail=f"Unknown logits_hook '{req.logits_hook}'. Valid: {list(LOGITS_PRESETS.keys())}")
         hook_cfg = dict(LOGITS_PRESETS[req.logits_hook])
         hook_type = hook_cfg.pop("hook")
         if req.logits_hook_params:
             hook_cfg.update(req.logits_hook_params)
-
         processor = build_logits_processor(hook_type, hook_cfg)
         if processor is not None:
             lp_list = LogitsProcessorList([processor])
@@ -608,8 +575,7 @@ async def generate_mechanical(req: MechanicalRequest):
     hook_level = "logits" if active_logits_hook else "decode"
 
     full_prompt = build_chat_input(NEUTRAL_SYSTEM_PROMPT, [], req.prompt)
-    input_ids = tokenizer(full_prompt, return_tensors="pt").input_ids
-    input_ids = input_ids.to(model_device or "cpu")
+    input_ids = tokenizer(full_prompt, return_tensors="pt").input_ids.to(model_device or "cpu")
     n_prompt_tokens = input_ids.shape[1]
 
     texts: list[str] = []
@@ -620,9 +586,11 @@ async def generate_mechanical(req: MechanicalRequest):
     t_wall_start = time.perf_counter()
 
     for i in range(req.replicate_count):
-        run_id_rep = f"mechanical-{req.preset}-{uuid.uuid4().hex[:8]}"
         text, n_tok, trace, fr = generate_one(
-            input_ids, cfg, run_id_rep, i, logits_processor_list=lp_list
+            input_ids, cfg,
+            f"mechanical-{req.preset}-{uuid.uuid4().hex[:8]}", i,
+            logits_processor_list=lp_list,
+            seed=req.seed,
         )
         texts.append(text)
         completion_token_counts.append(n_tok)
@@ -649,11 +617,13 @@ async def generate_mechanical(req: MechanicalRequest):
         "preset_params": preset_params,
         "logits_hook": active_logits_hook,
         "logits_hook_params": active_hook_params,
+        "seed": req.seed,
         "neutral_prompt_hash": NEUTRAL_PROMPT_HASH,
         "prompt_tokens": n_prompt_tokens,
         "completion_tokens": sum(completion_token_counts),
         "latency_ms": latency_ms,
         "peak_vram_gb": peak_vram_gb,
+        "transformers_version": TRANSFORMERS_VERSION,
         "token_metrics": [m.model_dump() if m else None for m in token_metrics_per_replicate],
     }
     try:
@@ -675,12 +645,14 @@ async def generate_mechanical(req: MechanicalRequest):
         model_name=model_name_str or "unknown",
         dtype=DTYPE_STR,
         device=model_device or "unknown",
+        transformers_version=TRANSFORMERS_VERSION,
         lane="mechanical",
         hook_level=hook_level,
         preset=req.preset,
         preset_params=preset_params,
         logits_hook=active_logits_hook,
         logits_hook_params=active_hook_params,
+        seed=req.seed,
         neutral_prompt_hash=NEUTRAL_PROMPT_HASH,
         token_metrics_per_replicate=token_metrics_per_replicate,
     )
