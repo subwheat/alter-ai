@@ -45,7 +45,7 @@ from transformers import (
     AutoModelForCausalLM,
     LogitsProcessor,
     LogitsProcessorList,
-    PreTrainedTokenizerFast,
+    AutoTokenizer,
 )
 
 # ---------------------------------------------------------------------------
@@ -89,7 +89,7 @@ def load_model():
         )
 
     log.info(f"Loading tokenizer from {MODEL_PATH}")
-    tokenizer = PreTrainedTokenizerFast.from_pretrained(MODEL_PATH, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
 
     device_map = DEVICE if DEVICE != "auto" else "auto"
     log.info(f"Loading model (dtype={DTYPE_STR}, device={device_map})")
@@ -128,7 +128,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="alter.ai Gemma 4 Sidecar", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="alter.ai Gemma 4 Sidecar", version="0.3.0", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +250,42 @@ def build_chat_input(system_prompt: str, messages: list[ChatMessage], prompt: st
     return "\n".join(parts)
 
 
+
+def is_qwen_model() -> bool:
+    name = (model_name_str or Path(MODEL_PATH).name or "").lower()
+    path = (MODEL_PATH or "").lower()
+    return "qwen" in name or "qwen" in path
+
+
+def build_model_inputs(system_prompt: str, messages: list[ChatMessage], prompt: str) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    device = model_device or "cpu"
+
+    if is_qwen_model():
+        chat_messages = []
+        if system_prompt:
+            chat_messages.append({"role": "system", "content": system_prompt})
+        for msg in messages:
+            role = "user" if msg.role == "user" else "assistant"
+            chat_messages.append({"role": role, "content": msg.content})
+        chat_messages.append({"role": "user", "content": prompt})
+
+        rendered = tokenizer.apply_chat_template(
+            chat_messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        enc = tokenizer(rendered, return_tensors="pt", add_special_tokens=False)
+    else:
+        full_prompt = build_chat_input(system_prompt, messages, prompt)
+        enc = tokenizer(full_prompt, return_tensors="pt")
+
+    input_ids = enc["input_ids"].to(device)
+    attention_mask = enc.get("attention_mask")
+    if attention_mask is not None:
+        attention_mask = attention_mask.to(device)
+    return input_ids, attention_mask
+
 def get_peak_vram_gb() -> Optional[float]:
     if torch.cuda.is_available():
         try:
@@ -321,6 +357,7 @@ def build_logits_processor(hook_type: str, hook_params: dict) -> Optional[Logits
 
 def generate_one(
     input_ids: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
     cfg: SamplingConfig,
     run_id: str,
     replicate_index: int,
@@ -351,6 +388,8 @@ def generate_one(
         "output_scores": True,
         "pad_token_id": tokenizer.eos_token_id,
     }
+    if attention_mask is not None:
+        gen_kwargs["attention_mask"] = attention_mask
     if cfg.top_k > 0:
         gen_kwargs["top_k"] = cfg.top_k
     if logits_processor_list is not None:
@@ -386,6 +425,7 @@ def generate_one(
             "top1_prob": round(top1_prob, 6),
             "top2_prob": round(top2_prob, 6),
             "margin_top1_top2": round(top1_prob - top2_prob, 6),
+            "replicate_index": replicate_index,
             "latency_ms": round((t_end - t_start) * 1000 / max(n_tokens, 1), 3),
         })
 
@@ -419,9 +459,7 @@ async def health():
 async def generate(req: GenerateRequest):
     if model is None or tokenizer is None:
         raise HTTPException(503, detail="Model not loaded")
-
-    full_prompt = build_chat_input(req.system_prompt, req.messages, req.prompt)
-    input_ids = tokenizer(full_prompt, return_tensors="pt").input_ids.to(model_device or "cpu")
+    input_ids, attention_mask = build_model_inputs(req.system_prompt, req.messages, req.prompt)
     n_prompt_tokens = input_ids.shape[1]
 
     texts, completion_token_counts, per_replicate_traces, finish_reasons = [], [], [], []
@@ -429,7 +467,7 @@ async def generate(req: GenerateRequest):
 
     for i in range(req.replicate_count):
         text, n_tok, trace, fr = generate_one(
-            input_ids, req.sampling_config, f"{req.substance}-{uuid.uuid4().hex[:8]}", i
+            input_ids, attention_mask, req.sampling_config, f"{req.substance}-{uuid.uuid4().hex[:8]}", i
         )
         texts.append(text)
         completion_token_counts.append(n_tok)
@@ -524,6 +562,7 @@ class MechanicalResponse(BaseModel):
     logits_hook_params: Optional[dict]
     seed: Optional[int]
     neutral_prompt_hash: str
+    run_id: str
     token_metrics_per_replicate: list[TokenMetricsSummary]
 
 
@@ -573,9 +612,7 @@ async def generate_mechanical(req: MechanicalRequest):
             active_hook_params = {"hook": hook_type, **hook_cfg}
 
     hook_level = "logits" if active_logits_hook else "decode"
-
-    full_prompt = build_chat_input(NEUTRAL_SYSTEM_PROMPT, [], req.prompt)
-    input_ids = tokenizer(full_prompt, return_tensors="pt").input_ids.to(model_device or "cpu")
+    input_ids, attention_mask = build_model_inputs(NEUTRAL_SYSTEM_PROMPT, [], req.prompt)
     n_prompt_tokens = input_ids.shape[1]
 
     texts: list[str] = []
@@ -587,7 +624,7 @@ async def generate_mechanical(req: MechanicalRequest):
 
     for i in range(req.replicate_count):
         text, n_tok, trace, fr = generate_one(
-            input_ids, cfg,
+            input_ids, attention_mask, cfg,
             f"mechanical-{req.preset}-{uuid.uuid4().hex[:8]}", i,
             logits_processor_list=lp_list,
             seed=req.seed,
@@ -608,7 +645,7 @@ async def generate_mechanical(req: MechanicalRequest):
     append_trace_log(run_trace_id, [e for t in per_replicate_traces for e in t])
 
     log_entry = {
-        "schema_version": "ego-llm-mechanical-v0.2",
+        "schema_version": "ego-llm-mechanical-v0.3",
         "run_id": run_trace_id,
         "timestamp_utc": datetime.datetime.utcnow().isoformat(),
         "lane": "mechanical",
@@ -654,5 +691,6 @@ async def generate_mechanical(req: MechanicalRequest):
         logits_hook_params=active_hook_params,
         seed=req.seed,
         neutral_prompt_hash=NEUTRAL_PROMPT_HASH,
+        run_id=run_trace_id,
         token_metrics_per_replicate=token_metrics_per_replicate,
     )

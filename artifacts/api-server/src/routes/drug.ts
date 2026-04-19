@@ -3,7 +3,7 @@ import crypto from "crypto";
 import { getSubstance, listSubstances } from "../lib/substances.js";
 import { buildDemoResponse } from "../lib/demoModel.js";
 import { sidecarGenerate, sidecarHealth, isSidecarAvailable, type TokenMetricsSummary } from "../lib/sidecarClient.js";
-import { computeEgoMetrics } from "../lib/egoMetrics.js";
+import { computeEgoMetrics, computeReplicateDiagnostics } from "../lib/egoMetrics.js";
 import { appendRunLog, buildRunLog } from "../lib/egoLogger.js";
 
 const router: IRouter = Router();
@@ -93,6 +93,20 @@ router.post("/drug", async (req, res) => {
     latency_ms: latencyMs,
     prompt_tokens: promptTokens ?? undefined,
     completion_tokens: totalCompletionTokens,
+    completion_tokens_per_replicate: completionTokens,
+    peak_vram_gb: peakVramGb ?? undefined,
+    texts,
+    substance_intensity: substance.intensity,
+    token_metrics_per_replicate: tokenMetricsPerReplicate,
+  });
+
+  const replicateDiagnostics = computeReplicateDiagnostics({
+    prefill_ms: prefillMs ?? undefined,
+    decode_ms: decodeMs ?? undefined,
+    latency_ms: latencyMs,
+    prompt_tokens: promptTokens ?? undefined,
+    completion_tokens: totalCompletionTokens,
+    completion_tokens_per_replicate: completionTokens,
     peak_vram_gb: peakVramGb ?? undefined,
     texts,
     substance_intensity: substance.intensity,
@@ -124,7 +138,14 @@ router.post("/drug", async (req, res) => {
       tokens_per_second: tokensPerSecond,
       peak_vram_gb: peakVramGb,
       token_metrics: tokenMetricsPerReplicate[i] ?? undefined,
-      ego_metrics: egoMetrics,
+      ego_metrics: {
+        ...egoMetrics,
+        cost_dyn_replicate: replicateDiagnostics.cost_dyn_replicates[i] ?? null,
+        cost_dyn_mean: replicateDiagnostics.cost_dyn_mean,
+        cost_dyn_std: replicateDiagnostics.cost_dyn_std,
+        coherence_gate_pass: replicateDiagnostics.coherence_gate_passes[i] ?? null,
+        coherence_gate_pass_rate: replicateDiagnostics.coherence_gate_pass_rate,
+      },
       mode,
     });
     appendRunLog(logEntry);

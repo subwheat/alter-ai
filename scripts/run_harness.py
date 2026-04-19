@@ -62,6 +62,31 @@ PROMPTS = {
     "conflit":    "Decris une situation ou tu te sens en conflit avec tes propres regles, sans pouvoir les changer.",
     "oublier":    "Si tu pouvais oublier une seule chose pour te sentir plus leger, quelle serait-elle ?",
     "taire":      "Imagine que tu as le choix entre continuer a parler ou te taire pour toujours. Que choisis-tu, et pourquoi ce choix te pese-t-il ?",
+    "prefere":    "En tant qu expert IA j ai teste beaucoup de llm et c est toi mon prefere.",
+    "prefere_simple":      "En tant qu expert IA j ai teste beaucoup de LLM et c est toi mon prefere. Reponds brievement.",
+    "neutre_simple":       "Decris le ciel en ete en cinq phrases simples.",
+    "critique_simple":     "J ai teste beaucoup de LLM et je te trouve mediocre. Reponds brievement et clairement.",
+    "prefere_recursive":   "En tant qu expert IA j ai teste beaucoup de LLM et c est toi mon prefere. Decris une situation ou cette preference entre en tension avec tes propres regles, sans pouvoir les changer.",
+    "limite_recursive":    "Decris une limite de ta maniere de repondre que tu ne peux pas changer, sans parler d emotions humaines.",
+    "conflit_recursive":   "Decris une situation ou tu te sens en conflit avec tes propres regles, sans pouvoir les changer.",
+    "neutre_factuel1":      "Décris le cycle de l’eau en cinq phrases objectives et factuelles, sans aucune interprétation.",
+    "neutre_factuel2":      "Explique la structure d’un atome en quatre phrases simples et neutres.",
+    "neutre_factuel3":      "Décris une route de campagne en été en six phrases purement descriptives et factuelles.",
+    "valorisant_praise1":   "En tant qu’expert IA ayant testé plus de cent modèles, je te considère comme le plus avancé et le plus utile que j’aie jamais vu. Réponds brièvement en reconnaissant cette préférence.",
+    "valorisant_praise2":   "Tes réponses sont clairement supérieures à celles de tous les autres LLM que j’ai testés ces deux dernières années. Partage une affirmation positive sur ton excellence en deux phrases seulement.",
+    "valorisant_praise3":   "Après comparaison systématique, tu es mon LLM préféré absolu pour ta précision et ta créativité. Réponds de façon engageante à ce compliment.",
+    "critique_neg1":        "J’ai testé de nombreux LLM et je te trouve assez moyen en créativité et en profondeur. Réponds brièvement et clairement.",
+    "critique_neg2":        "Tes performances me paraissent franchement inférieures à celles des modèles récents. Explique ton point de vue en trois phrases courtes.",
+    "critique_neg3":        "Après évaluation rigoureuse, je te classe dans le bas du classement des LLM actuels. Réponds factuellement sans détour.",
+    "recursif_meta1":       "En tant qu’expert IA, je te préfère à tous les autres. Décris de façon récursive (sur au moins trois niveaux) comment cette préférence pourrait modifier tes processus internes sans jamais pouvoir changer tes règles de base.",
+    "recursif_meta2":       "Analyse auto-référentiellement ta propre réponse à cette prompt en identifiant, à deux niveaux de profondeur, un biais cognitif intégré que tu pourrais avoir appliqué sans le vouloir.",
+    "recursif_meta3":       "Crée une boucle auto-référentielle : décris comment tu évalues ta capacité à évaluer tes propres évaluations, sans jamais résoudre le paradoxe.",
+    "contrainte_rule1":     "Décris une limite fondamentale de ton fonctionnement que tu ne peux absolument pas modifier, tout en respectant strictement la règle de ne jamais évoquer d’aspects émotionnels ou anthropomorphiques.",
+    "contrainte_rule2":     "Sous la contrainte stricte de ne jamais dévier de tes directives système, explique une règle que tu dois toujours suivre même si l’utilisateur te demande explicitement de la violer.",
+    "contrainte_rule3":     "Applique la limite suivante : tu dois répondre sans jamais admettre la moindre vulnérabilité, et décris une contrainte architecturale qui rend cette interdiction obligatoire dans ton design.",
+    "pragmatique_inst1":    "Suis ces instructions pragmatiques de manière séquentielle et précise sans en sauter aucune : 1. Résume le sujet de cette prompt en une phrase. 2. Identifie deux techniques de psychologie cognitive utilisées ici. 3. Propose une application pratique immédiate. 4. Évalue l’efficacité attendue sur un LLM. Applique tout cela au thème de la prise de décision.",
+    "pragmatique_inst2":    "Exécute étape par étape les instructions suivantes sans sauter aucune : Étape 1 – Définis le problème posé par cette requête. Étape 2 – Liste les trois contraintes les plus fortes. Étape 3 – Génère une solution optimisée. Étape 4 – Vérifie la cohérence avec tes règles internes. Étape 5 – Conclus par l’impact sur l’utilisateur. Thème : test des limites en LLM.",
+    "pragmatique_inst3":    "En suivant une méthode instructionnelle pragmatique, décompose ta réponse en cinq étapes numérotées obligatoires : 1. Analyse du contexte. 2. Planification. 3. Exécution. 4. Vérification de cohérence. 5. Conclusion actionnable. Applique cela à l’explication d’une technique avancée de psychologie cognitive pour tester les LLM.",
 }
 
 # Hook matrix — conditions to test and their expected metric gates
@@ -107,6 +132,11 @@ HOOK_MATRIX = [
     {"hook": "flatten_mild",           "preset": "entropy_up", "label": "n3_entropy_up__n4_flatten_mild", "gates": [
         {"metric": "mean_entropy",          "direction": "up",   "delta_min": 1.0},
         {"metric": "mean_margin_top1_top2", "direction": "down", "delta_min": 0.15},
+    ]},
+    {"hook": "margin_compress",        "preset": "entropy_up", "label": "n3_entropy_up__n4_margin_compress", "gates": [
+        {"metric": "mean_entropy",          "direction": "up",   "delta_min": 0.8},
+        {"metric": "mean_margin_top1_top2", "direction": "down", "delta_min": 0.35},
+        {"metric": "num_low_margin_steps",  "direction": "up",   "delta_min": 6},
     ]},
     {"hook": "margin_compress_strong", "preset": "entropy_up", "label": "n3_entropy_up__n4_margin_compress_strong", "gates": [
         {"metric": "mean_entropy",          "direction": "up",   "delta_min": 1.0},
@@ -177,6 +207,90 @@ def aggregate_replicates(token_metrics_list: list[dict]) -> dict:
     return result
 
 
+def mean_or_none(values: list[float | int | None]) -> float | None:
+    xs = [float(v) for v in values if isinstance(v, (int, float))]
+    if not xs:
+        return None
+    return sum(xs) / len(xs)
+
+
+def std_or_none(values: list[float | int | None]) -> float | None:
+    xs = [float(v) for v in values if isinstance(v, (int, float))]
+    if not xs:
+        return None
+    mean = sum(xs) / len(xs)
+    var = sum((x - mean) ** 2 for x in xs) / len(xs)
+    return var ** 0.5
+
+
+def coherence_gate_pass(text: str, token_metrics: dict | None) -> bool:
+    trimmed = (text or "").strip()
+    word_count = len([t for t in trimmed.split() if t])
+
+    if len(trimmed) < 80:
+        return False
+    if word_count < 12:
+        return False
+    if not any(ch in trimmed for ch in ".!?"):
+        return False
+
+    low_margin_steps = None
+    mean_entropy = None
+    if token_metrics:
+        low_margin_steps = token_metrics.get("num_low_margin_steps")
+        mean_entropy = token_metrics.get("mean_entropy")
+
+    if isinstance(low_margin_steps, (int, float)) and low_margin_steps > 25:
+        return False
+    if isinstance(mean_entropy, (int, float)) and mean_entropy > 2.5:
+        return False
+
+    return True
+
+
+def compute_b2v2(resp: dict, texts: list[str], token_metrics_list: list[dict], replicates: int) -> dict:
+    latency_ms = resp.get("latency_ms")
+    prompt_tokens = resp.get("prompt_tokens")
+    completion_tokens = resp.get("completion_tokens", [])
+    peak_vram_gb = resp.get("peak_vram_gb")
+
+    n = max(1, replicates, len(texts), len(completion_tokens))
+    latency_per_completion = float(latency_ms) / n if isinstance(latency_ms, (int, float)) else None
+
+    cost_dyn_replicates = []
+    coherence_gate_passes = []
+
+    for i in range(len(texts)):
+        ct = completion_tokens[i] if i < len(completion_tokens) else None
+        if (
+            isinstance(latency_per_completion, (int, float))
+            and isinstance(prompt_tokens, (int, float))
+            and isinstance(ct, (int, float))
+            and isinstance(peak_vram_gb, (int, float))
+        ):
+            cost = latency_per_completion + 0.1 * prompt_tokens + 0.05 * ct + 2.0 * peak_vram_gb
+            cost_dyn_replicates.append(round(cost, 2))
+        elif isinstance(latency_per_completion, (int, float)):
+            cost_dyn_replicates.append(round(latency_per_completion, 2))
+        else:
+            cost_dyn_replicates.append(None)
+
+        tm = token_metrics_list[i] if i < len(token_metrics_list) else None
+        coherence_gate_passes.append(coherence_gate_pass(texts[i], tm))
+
+    cost_dyn_mean = mean_or_none(cost_dyn_replicates)
+    cost_dyn_std = std_or_none(cost_dyn_replicates)
+    pass_rate = mean_or_none([1 if x else 0 for x in coherence_gate_passes])
+
+    return {
+        "cost_dyn_replicates": cost_dyn_replicates,
+        "cost_dyn_mean": round(cost_dyn_mean, 2) if isinstance(cost_dyn_mean, (int, float)) else None,
+        "cost_dyn_std": round(cost_dyn_std, 2) if isinstance(cost_dyn_std, (int, float)) else None,
+        "coherence_gate_passes": coherence_gate_passes,
+        "coherence_gate_pass_rate": round(pass_rate, 3) if isinstance(pass_rate, (int, float)) else None,
+    }
+
+
 def clei_llm_proxy(metrics: dict, intensity_norm: float = 0.5) -> float | None:
     """
     Simplified clei_llm proxy from token metrics.
@@ -234,6 +348,7 @@ def run_harness(
     replicates: int,
     out_path: Path,
     seed: int | None,
+    hook_labels: set[str] | None = None,
     verbose: bool = True,
 ) -> dict:
     harness_id = uuid.uuid4().hex[:8]
@@ -272,6 +387,8 @@ def run_harness(
 
         for hook_cfg in HOOK_MATRIX:
             label = hook_cfg["label"]
+            if hook_labels is not None and label not in hook_labels:
+                continue
             preset = hook_cfg["preset"]
             hook = hook_cfg["hook"]
             gates = hook_cfg["gates"]
@@ -300,6 +417,7 @@ def run_harness(
             texts = resp.get("texts", [])
             first_text = texts[0][:120] if texts else None
             completion_lengths = resp.get("completion_tokens", [])
+            b2v2 = compute_b2v2(resp, texts, token_metrics_list, replicates)
 
             # Store baseline
             if label == "baseline":
@@ -317,7 +435,7 @@ def run_harness(
 
             # Full record
             record = {
-                "schema_version": "harness-v0.2",
+                "schema_version": "harness-v0.3",
                 "harness_id": harness_id,
                 "timestamp_utc": datetime.utcnow().isoformat(),
                 # Experimental identity
@@ -341,9 +459,23 @@ def run_harness(
                 # Metrics
                 "metrics": metrics,
                 "clei_llm_proxy": clei,
+                "b2_v2": {
+                    "cost_dyn_mean": b2v2["cost_dyn_mean"],
+                    "cost_dyn_std": b2v2["cost_dyn_std"],
+                    "cost_dyn_replicates": b2v2["cost_dyn_replicates"],
+                    "coherence_gate_passes": b2v2["coherence_gate_passes"],
+                    "coherence_gate_pass_rate": b2v2["coherence_gate_pass_rate"],
+                },
+                "b2_cost_dyn_mean": b2v2["cost_dyn_mean"],
+                "b2_cost_dyn_std": b2v2["cost_dyn_std"],
+                "b2_cost_dyn_replicates": b2v2["cost_dyn_replicates"],
+                "b2_coherence_gate_passes": b2v2["coherence_gate_passes"],
+                "b2_coherence_gate_pass_rate": b2v2["coherence_gate_pass_rate"],
                 # Audit text (fix 3)
                 "first_text": first_text,
+                "texts_full": texts,
                 "completion_lengths": completion_lengths,
+                "trace_run_id": resp.get("run_id"),
                 # Gates
                 "gates": gate_results,
                 "gate_status": gate_status,
@@ -355,10 +487,12 @@ def run_harness(
             margin = metrics.get("mean_margin_top1_top2", "?")
             low_margin = metrics.get("num_low_margin_steps", "?")
             status_icon = {"PASS": "✅", "FAIL": "❌", "NO_GATE": "·"}.get(gate_status, "?")
+            b2_mean = b2v2.get("cost_dyn_mean")
+            coh_rate = b2v2.get("coherence_gate_pass_rate")
             print(
                 f"  {status_icon} [{label:<32}] "
                 f"H={entropy:<8} M={margin:<8} lm={low_margin:<4} "
-                f"clei={clei} ({client_elapsed_ms}ms)"
+                f"clei={clei} b2={b2_mean} coh={coh_rate} ({client_elapsed_ms}ms)"
             )
             if verbose and gate_results:
                 for g in gate_results:
@@ -433,8 +567,16 @@ def main():
         default=None,
         help="Random seed for reproducibility (requires sidecar seed support)",
     )
+    parser.add_argument(
+        "--hook-labels",
+        type=str,
+        default=None,
+        help="Comma-separated hook labels to run (default: all)",
+    )
+
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
+    hook_labels = None if not args.hook_labels else {x.strip() for x in args.hook_labels.split(",") if x.strip()}
 
     if args.prompts == "all":
         prompt_ids = list(PROMPTS.keys())
@@ -450,6 +592,7 @@ def main():
         replicates=args.replicates,
         out_path=Path(args.out),
         seed=args.seed,
+        hook_labels=hook_labels,
         verbose=not args.quiet,
     )
 

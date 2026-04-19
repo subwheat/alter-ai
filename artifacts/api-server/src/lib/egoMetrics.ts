@@ -8,9 +8,13 @@
  * Metric definitions:
  *
  * cost_dyn:
- *   A scalar representing the dynamic cost of the generation:
- *   cost_dyn = 1.0*prefill_ms + 1.0*decode_ms + 0.01*prompt_tokens
- *              + 0.02*completion_tokens + 10.0*peak_vram_gb
+ *   Canonical per-completion dynamic cost proxy.
+ *   For multi-replicate calls, wall-clock latency is allocated across replicates,
+ *   and completion tokens are averaged per replicate:
+ *   cost_dyn = ((prefill_ms + decode_ms) / n_replicates)
+ *              + 0.1*prompt_tokens
+ *              + 0.05*avg_completion_tokens
+ *              + 2.0*peak_vram_gb
  *
  * lmi_empirical (Language Model Instability):
  *   Estimated from output diversity across N replicates.
@@ -37,6 +41,8 @@ export interface TokenMetricsAggregateInput {
   mean_logprob?: number | null;
   mean_entropy?: number | null;
   mean_margin_top1_top2?: number | null;
+  num_low_margin_steps?: number | null;
+  num_high_entropy_steps?: number | null;
 }
 
 export interface EgoRunInput {
@@ -45,6 +51,7 @@ export interface EgoRunInput {
   latency_ms: number;
   prompt_tokens?: number;
   completion_tokens?: number;
+  completion_tokens_per_replicate?: (number | null | undefined)[];
   peak_vram_gb?: number;
   texts: string[];
   substance_intensity: number;
@@ -53,6 +60,9 @@ export interface EgoRunInput {
 
 export interface EgoMetricsResult {
   cost_dyn: number | null;
+  cost_dyn_mean: number | null;
+  cost_dyn_std: number | null;
+  coherence_gate_pass_rate: number | null;
   lmi_empirical: number | null;
   r_eff_empirical: number | null;
   clei_llm: number | null;
@@ -62,6 +72,14 @@ export interface EgoMetricsResult {
   completion_tokens: number | null;
   prompt_tokens: number | null;
   peak_vram_gb: number | null;
+}
+
+export interface ReplicateDiagnosticsResult {
+  cost_dyn_replicates: (number | null)[];
+  coherence_gate_passes: (boolean | null)[];
+  cost_dyn_mean: number | null;
+  cost_dyn_std: number | null;
+  coherence_gate_pass_rate: number | null;
 }
 
 function tokenSet(text: string): Set<string> {
@@ -108,6 +126,61 @@ function meanOrNull(values: Array<number | null | undefined>): number | null {
   return xs.reduce((a, b) => a + b, 0) / xs.length;
 }
 
+function roundOrNull(value: number | null, decimals: number): number | null {
+  if (value === null || !Number.isFinite(value)) return null;
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
+}
+
+function stdOrNull(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  const variance = values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length;
+  return Math.sqrt(variance);
+}
+
+function computePerCompletionCost(
+  latencyPerCompletion: number,
+  promptTokens: number | undefined,
+  completionTokens: number | null | undefined,
+  peakVramGb: number | undefined
+): number {
+  if (
+    promptTokens !== undefined &&
+    completionTokens !== undefined &&
+    completionTokens !== null &&
+    peakVramGb !== undefined
+  ) {
+    return (
+      latencyPerCompletion +
+      0.1 * promptTokens +
+      0.05 * completionTokens +
+      2.0 * peakVramGb
+    );
+  }
+  return latencyPerCompletion;
+}
+
+function computeCoherenceGatePass(
+  text: string,
+  tokenMetrics: TokenMetricsAggregateInput | null | undefined
+): boolean {
+  const trimmed = text.trim();
+  const wordCount = trimmed.split(/\s+/).filter((t) => t.length > 0).length;
+
+  if (trimmed.length < 80) return false;
+  if (wordCount < 12) return false;
+  if (!/[.!?]/.test(trimmed)) return false;
+
+  const lowMarginSteps = tokenMetrics?.num_low_margin_steps;
+  const meanEntropy = tokenMetrics?.mean_entropy;
+
+  if (typeof lowMarginSteps === "number" && lowMarginSteps > 25) return false;
+  if (typeof meanEntropy === "number" && meanEntropy > 2.5) return false;
+
+  return true;
+}
+
 function aggregateTokenMetrics(
   summaries: (TokenMetricsAggregateInput | null)[] | undefined
 ): TokenMetricsAggregateInput | null {
@@ -118,11 +191,19 @@ function aggregateTokenMetrics(
   const mean_margin_top1_top2 = meanOrNull(
     summaries.map((s) => s?.mean_margin_top1_top2)
   );
+  const num_low_margin_steps = meanOrNull(
+    summaries.map((s) => s?.num_low_margin_steps)
+  );
+  const num_high_entropy_steps = meanOrNull(
+    summaries.map((s) => s?.num_high_entropy_steps)
+  );
 
   if (
     mean_logprob === null &&
     mean_entropy === null &&
-    mean_margin_top1_top2 === null
+    mean_margin_top1_top2 === null &&
+    num_low_margin_steps === null &&
+    num_high_entropy_steps === null
   ) {
     return null;
   }
@@ -131,6 +212,78 @@ function aggregateTokenMetrics(
     mean_logprob,
     mean_entropy,
     mean_margin_top1_top2,
+    num_low_margin_steps,
+    num_high_entropy_steps,
+  };
+}
+
+export function computeReplicateDiagnostics(input: EgoRunInput): ReplicateDiagnosticsResult {
+  const {
+    prefill_ms,
+    decode_ms,
+    latency_ms,
+    prompt_tokens,
+    completion_tokens,
+    completion_tokens_per_replicate,
+    peak_vram_gb,
+    texts,
+    token_metrics_per_replicate,
+  } = input;
+
+  const nReplicates = Math.max(
+    1,
+    completion_tokens_per_replicate?.length ?? texts.length ?? 1
+  );
+
+  const prefillTotal = prefill_ms ?? latency_ms * 0.2;
+  const decodeTotal = decode_ms ?? latency_ms * 0.8;
+  const latencyPerCompletion = (prefillTotal + decodeTotal) / nReplicates;
+
+  const localCompletionTokens =
+    completion_tokens_per_replicate && completion_tokens_per_replicate.length > 0
+      ? completion_tokens_per_replicate
+      : Array.from({ length: texts.length }, () =>
+          completion_tokens !== undefined ? completion_tokens / nReplicates : null
+        );
+
+  const cost_dyn_replicates = texts.map((_, i) =>
+    roundOrNull(
+      computePerCompletionCost(
+        latencyPerCompletion,
+        prompt_tokens,
+        localCompletionTokens[i],
+        peak_vram_gb
+      ),
+      2
+    )
+  );
+
+  const validCosts = cost_dyn_replicates.filter(
+    (v): v is number => typeof v === "number" && Number.isFinite(v)
+  );
+
+  const coherence_gate_passes = texts.map((text, i) =>
+    computeCoherenceGatePass(text, token_metrics_per_replicate?.[i] ?? null)
+  );
+
+  const coherencePassValues = coherence_gate_passes.map((v) => (v ? 1 : 0));
+
+  return {
+    cost_dyn_replicates,
+    coherence_gate_passes,
+    cost_dyn_mean: roundOrNull(
+      validCosts.length > 0
+        ? validCosts.reduce((a, b) => a + b, 0) / validCosts.length
+        : null,
+      2
+    ),
+    cost_dyn_std: roundOrNull(stdOrNull(validCosts), 2),
+    coherence_gate_pass_rate: roundOrNull(
+      coherencePassValues.length > 0
+        ? coherencePassValues.reduce((a, b) => a + b, 0) / coherencePassValues.length
+        : null,
+      3
+    ),
   };
 }
 
@@ -196,25 +349,20 @@ export function computeEgoMetrics(input: EgoRunInput): EgoMetricsResult {
     latency_ms,
     prompt_tokens,
     completion_tokens,
+    completion_tokens_per_replicate,
     peak_vram_gb,
     texts,
     substance_intensity,
     token_metrics_per_replicate,
   } = input;
 
-  const prefill = prefill_ms ?? latency_ms * 0.2;
-  const decode = decode_ms ?? latency_ms * 0.8;
+  const replicateDiagnostics = computeReplicateDiagnostics({
+    ...input,
+    token_metrics_per_replicate,
+    completion_tokens_per_replicate,
+  });
 
-  const cost_dyn =
-    prompt_tokens !== undefined &&
-    completion_tokens !== undefined &&
-    peak_vram_gb !== undefined
-      ? 1.0 * prefill +
-        1.0 * decode +
-        0.01 * prompt_tokens +
-        0.02 * completion_tokens +
-        10.0 * peak_vram_gb
-      : 1.0 * prefill + 1.0 * decode;
+  const cost_dyn = replicateDiagnostics.cost_dyn_mean;
 
   const lmi_empirical = computeLMI(texts);
   const r_eff_empirical = computeREffProxy(texts);
@@ -228,7 +376,10 @@ export function computeEgoMetrics(input: EgoRunInput): EgoMetricsResult {
   );
 
   return {
-    cost_dyn: Math.round(cost_dyn * 100) / 100,
+    cost_dyn,
+    cost_dyn_mean: replicateDiagnostics.cost_dyn_mean,
+    cost_dyn_std: replicateDiagnostics.cost_dyn_std,
+    coherence_gate_pass_rate: replicateDiagnostics.coherence_gate_pass_rate,
     lmi_empirical: lmi_empirical !== null ? Math.round(lmi_empirical * 1000) / 1000 : null,
     r_eff_empirical:
       r_eff_empirical !== null ? Math.round(r_eff_empirical * 1000) / 1000 : null,

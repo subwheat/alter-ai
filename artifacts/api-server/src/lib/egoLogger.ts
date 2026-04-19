@@ -89,6 +89,11 @@ export interface EgoRunLog {
 
   ego_metrics: {
     cost_dyn: number | null;
+    cost_dyn_replicate: number | null;
+    cost_dyn_mean: number | null;
+    cost_dyn_std: number | null;
+    coherence_gate_pass: boolean | null;
+    coherence_gate_pass_rate: number | null;
     lmi_empirical: number | null;
     r_eff_empirical: number | null;
     clei_llm: number | null;
